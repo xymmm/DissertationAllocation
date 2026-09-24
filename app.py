@@ -1,22 +1,27 @@
 """
 app.py
 ======
-Streamlit front end for undergraduate dissertation allocation, written for a
-teaching operations office rather than for an academic: every stage produces a
-downloadable artefact, every parameter that affects the outcome is on screen,
-and the allocation itself is deterministic so that a rerun with the same inputs
-reproduces the same result.
+Streamlit front end for dissertation allocation, undergraduate and taught
+postgraduate, written for a teaching operations office rather than for an
+academic. Every stage produces a downloadable artefact, every parameter that
+affects the outcome is visible on screen, and the allocation itself is
+deterministic, so rerunning with the same inputs reproduces the same result
+when a student queries their supervisor.
+
+State for the session lives in a JSON store held by the application rather than
+in whichever spreadsheet was uploaded most recently. Committing a round writes
+back to the supervisor register immediately, so a supervisor who has taken six
+masters students has that much less capacity when the undergraduate round runs
+a fortnight later.
 
 Run with:  streamlit run app.py
 """
 
 from __future__ import annotations
 
-import io
 import json
 import math
 import re
-from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -24,9 +29,10 @@ import streamlit as st
 
 import matching_core as mc
 import elm_client as elm
-import rounds as rd
+import store as stx
+import text_analysis as ta
 
-st.set_page_config(page_title="毕业论文导师分配", layout="wide", page_icon="🎓")
+st.set_page_config(page_title="Dissertation allocation", layout="wide", page_icon="🎓")
 
 DEFAULT_AREA_VOCAB = [
     "supply chain", "operations", "logistics", "marketing analytics",
@@ -40,17 +46,14 @@ DEFAULT_METHOD_VOCAB = [
     "experiment", "network analysis", "systematic review",
 ]
 
-# ---------------------------------------------------------------------------
-# Session state
-# ---------------------------------------------------------------------------
-
 for key, default in [
-    ("supervisors", None), ("students", None), ("score", None),
-    ("components", None), ("candidates", None), ("result", None),
-    ("llm_scores", None), ("extracted", None), ("audit", None),
+    ("students", None), ("score", None), ("components", None),
+    ("candidates", None), ("result", None), ("extracted", None),
+    ("audit", None), ("diagnostics", None), ("conflicts", None),
+    ("round_scope", None), ("requirements", None), ("taxonomy_raw", None),
+    ("store_path", "session_2026-27.json"),
+    ("session_label", "2026/27"), ("store", None),
     ("pseudo", elm.Pseudonymiser()),
-    ("ledger_path", "allocation_ledger.json"), ("ledger", None),
-    ("blocked_pairs", None), ("round_scope", None), ("diagnostics", None),
 ]:
     st.session_state.setdefault(key, default)
 
@@ -66,193 +69,345 @@ def to_csv_bytes(df: pd.DataFrame) -> bytes:
     return df.to_csv(index=False).encode("utf-8-sig")
 
 
-def get_ledger() -> rd.Ledger:
-    path = st.session_state.ledger_path
-    ledger = st.session_state.ledger
-    if ledger is None or str(ledger.path) != str(path):
-        ledger = rd.Ledger(path)
-        st.session_state.ledger = ledger
-    return ledger
+def get_store() -> stx.SessionStore:
+    """Return the session store, reloading it if another user has saved."""
+    path = st.session_state.store_path
+    store = st.session_state.store
+    if store is None or str(store.path) != str(path):
+        store = stx.SessionStore(path, session=st.session_state.session_label)
+        st.session_state.store = store
+    else:
+        store.ensure_fresh()
+    return store
+
+
+def guarded(fn, *args, **kwargs):
+    """Run a store mutation and report a clash rather than losing the edit."""
+    try:
+        return fn(*args, **kwargs), None
+    except stx.ConcurrentEditError as exc:
+        return None, str(exc)
 
 
 # ---------------------------------------------------------------------------
-# Sidebar: ELM configuration
+# Sidebar
 # ---------------------------------------------------------------------------
 
 with st.sidebar:
-    st.header("ELM 设置")
-    st.caption("API key 在 ELM 平台内部申请，base URL 以 ELM 文档给出的为准，"
-               "填到 /chat/completions 之前的那一段。")
+    st.header("Academic session")
+    st.session_state.store_path = st.text_input(
+        "Session file", value=st.session_state.store_path,
+        help="Holds the supervisor register, every committed round and the audit trail "
+             "for one academic session. Start a new file at the beginning of each session.")
+    store = get_store()
+    st.caption(f"Session {store.session} · register version {store.version} · "
+               f"{len(store.data['supervisors'])} supervisors · "
+               f"{len(store.data['rounds'])} rounds committed")
+
+    st.divider()
+    st.header("ELM")
+    st.caption("Request an API key from inside ELM. Enter the base URL up to the segment "
+               "before /chat/completions.")
     base_url = st.text_input("Base URL", value=elm.DEFAULT_BASE_URL,
                              placeholder="https://<elm-endpoint>/v1")
     api_key = st.text_input("API key", value="", type="password")
-    model_name = st.text_input("模型", value=elm.DEFAULT_MODEL)
-    max_workers = st.slider("并发请求数", 1, 12, 6)
-    use_cache = st.checkbox("缓存模型响应", value=True,
-                            help="同样的输入不重复调用，改参数重跑时省时间也省额度")
-
+    model_name = st.text_input("Model", value=elm.DEFAULT_MODEL)
+    max_workers = st.slider("Concurrent requests", 1, 12, 6)
+    use_cache = st.checkbox("Cache model responses", value=True,
+                            help="Identical inputs are not sent twice, which saves both time "
+                                 "and quota when parameters are revised and the run repeated")
     elm_cfg = elm.ELMConfig(base_url=base_url, api_key=api_key, model=model_name,
                             max_workers=max_workers, use_cache=use_cache)
     elm_ready = bool(base_url and api_key)
-    st.success("ELM 已配置") if elm_ready else st.info("未配置 ELM，规则打分与优化仍可正常使用")
+    if elm_ready:
+        st.success("ELM configured")
+    else:
+        st.info("ELM is not configured. Rule-based scoring and the optimisation still work.")
 
     st.divider()
-    st.header("轮次台账")
-    st.session_state.ledger_path = st.text_input(
-        "台账文件", value=st.session_state.ledger_path,
-        help="所有已定分配与剩余容量都存在这个文件里，可复制、可归档、可回滚")
-    _ledger = get_ledger()
-    st.caption(f"已提交 {len(_ledger.rounds)} 轮，已定 {len(_ledger.committed_students())} 位学生")
-
-    st.divider()
-    st.header("求解引擎")
-    engine = st.radio("引擎", ["lp", "milp"], index=0,
-                      format_func=lambda x: {"lp": "运输 LP + 拉格朗日二分（快）",
-                                             "milp": "精确 MILP（交叉验证）"}[x])
-    milp_solver = st.selectbox("MILP 求解器", ["auto", "PULP_CBC_CMD", "HiGHS_CMD", "GUROBI_CMD"],
+    st.header("Solver")
+    engine = st.radio("Engine", ["lp", "milp"], index=0,
+                      format_func=lambda x: {"lp": "Transportation LP with bisection (fast)",
+                                             "milp": "Exact MILP (cross-check)"}[x])
+    milp_solver = st.selectbox("MILP solver",
+                               ["auto", "PULP_CBC_CMD", "HiGHS_CMD", "GUROBI_CMD"],
                                index=0, disabled=(engine != "milp"))
-    st.caption("两条路径在同样的容差下应当给出同样的目标值，"
-               "定稿前用 MILP 跑一次作为对照即可。")
+    st.caption("Both routes should return the same objective at the same tolerance. Run the "
+               "MILP once before signing off a round as a check.")
 
-st.title("本科毕业论文导师分配")
-st.caption("Teaching Operations Office 操作台")
+st.title("Dissertation allocation")
+st.caption("Teaching Operations Office · undergraduate and taught postgraduate")
 
-tab_data, tab_score, tab_alloc, tab_audit, tab_rounds, tab_export = st.tabs(
-    ["① 数据", "② 匹配打分", "③ 分配优化", "④ AI 复核", "⑤ 轮次台账", "⑥ 导出"])
+tab_reg, tab_students, tab_score, tab_alloc, tab_audit, tab_rounds, tab_export = st.tabs(
+    ["① Register", "② Students", "③ Matching", "④ Allocation round",
+     "⑤ AI review", "⑥ Rounds", "⑦ Export"])
 
 # ---------------------------------------------------------------------------
-# Tab 1: data
+# Tab 1: supervisor register
 # ---------------------------------------------------------------------------
 
-with tab_data:
-    col_sup, col_stu = st.columns(2)
+with tab_reg:
+    store = get_store()
+    st.subheader("Supervisor register")
+    st.caption("The register is the authoritative record for this session. A spreadsheet seeds "
+               "it and later merges changes into it, but never replaces it, because a "
+               "supervisor already carrying students must not be able to vanish from the "
+               "register through a stale upload.")
 
-    with col_sup:
-        st.subheader("导师池")
-        st.caption("必填列：supervisor_id, name, group, research_areas, methods, workload。"
-                   "workload 就是这一届该老师认领的论文数上限，逐年重填。")
-        f_sup = st.file_uploader("上传导师表", type=["csv", "xlsx"], key="sup_up")
-        if st.button("载入示例导师表"):
-            st.session_state.supervisors = pd.read_csv("sample_supervisors.csv", dtype=str).fillna("")
-        if f_sup is not None:
-            st.session_state.supervisors = read_table(f_sup)
+    c1, c2 = st.columns(2)
+    with c1:
+        f_sup = st.file_uploader("Upload or refresh the register", type=["csv", "xlsx"],
+                                 key="sup_up")
+        update_allowances = st.checkbox(
+            "Take allowances from the upload as well as profiles", value=True,
+            help="Untick when allowances have been edited in the application and the "
+                 "spreadsheet is out of date. Profiles are still refreshed.")
+        if st.button("Load the sample register"):
+            sample = pd.read_csv("sample_supervisors.csv", dtype=str).fillna("")
+            report, err = guarded(store.sync_from_dataframe, sample)
+            if err:
+                st.error(err)
+            else:
+                st.success(f"Added {len(report['added'])}, updated {len(report['updated'])}")
+                if report.get("tags_trimmed"):
+                    st.warning(f"{len(report['tags_trimmed'])} tag lists were longer than agreed "
+                               "and have been trimmed; see the table below.")
+                    st.session_state.trim_report = pd.DataFrame(report["tags_trimmed"])
+        if f_sup is not None and st.button("Merge the uploaded file"):
+            report, err = guarded(store.sync_from_dataframe, read_table(f_sup),
+                                  update_allowances=update_allowances)
+            if err:
+                st.error(err)
+            else:
+                st.success(f"Added {len(report['added'])}, updated {len(report['updated'])}, "
+                           f"unchanged {len(report['unchanged'])}")
+                if report.get("tags_trimmed"):
+                    st.session_state.trim_report = pd.DataFrame(report["tags_trimmed"])
+                    st.warning(f"{len(report['tags_trimmed'])} tag lists exceeded the agreed "
+                               "limits and have been trimmed in the order given.")
+                if report["absent_from_upload"]:
+                    st.warning(
+                        f"{len(report['absent_from_upload'])} supervisors in the register were "
+                        "not in the upload and have been left untouched: "
+                        + ", ".join(report["absent_from_upload"][:12])
+                        + ("…" if len(report["absent_from_upload"]) > 12 else ""))
+    with c2:
+        st.markdown("**Tag limits**")
+        st.caption(f"At most {mc.MAX_AREA_TAGS} research areas and {mc.MAX_METHOD_TAGS} methods "
+                   "per supervisor, the same limits the data collection form should impose. "
+                   "Order matters and is kept: a supervisor who lists inventory control first "
+                   "and stochastic programming fourth is telling the office something, and the "
+                   "score reflects it. Longer lists are trimmed from the end rather than "
+                   "rejected, and what was dropped is reported so it can be discussed rather "
+                   "than lost.")
+        if st.session_state.get("trim_report") is not None:
+            st.dataframe(st.session_state.trim_report, width="stretch", height=160)
 
-    with col_stu:
-        st.subheader("学生提交")
-        st.caption("必填列：student_id, project_title, abstract。"
-                   "可选 project_name, areas, methods, references, "
-                   "preferred_supervisor_id, locked_supervisor_id。")
-        f_stu = st.file_uploader("上传学生表", type=["csv", "xlsx"], key="stu_up")
-        if st.button("载入示例学生表"):
-            st.session_state.students = pd.read_csv("sample_students.csv", dtype=str).fillna("")
-        if f_stu is not None:
-            st.session_state.students = read_table(f_stu)
+        st.markdown("**Supervision units**")
+        st.caption("An allowance is held in units rather than in a headcount, because a masters "
+                   "dissertation is not the same amount of work as an undergraduate one. "
+                   "Twelve units at the weights below buys twelve undergraduates, or eight "
+                   "masters students, or any mixture of the two.")
+        weights = store.level_weights
+        wc = st.columns(len(weights))
+        new_weights = {}
+        for k, (lvl, w) in enumerate(sorted(weights.items())):
+            new_weights[lvl] = wc[k].number_input(f"{lvl} weight", 0.1, 5.0, float(w), 0.1,
+                                                  key=f"w_{lvl}")
+        if st.button("Save weights"):
+            _, err = guarded(store.set_level_weights, new_weights)
+            st.error(err) if err else st.success("Weights updated")
+
+    reg = store.register_dataframe()
+    if not len(reg):
+        st.info("The register is empty. Seed it from a spreadsheet above.")
+    else:
+        st.divider()
+        st.markdown("**Current register and remaining capacity**")
+        level_pick = st.selectbox("Show remaining places for level",
+                                  sorted(store.level_weights.keys()))
+        cap_table = store.capacity_table(reg, level=level_pick)
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Supervisors", len(reg))
+        c2.metric("Allowance (units)", f"{cap_table['allowance_units'].sum():.0f}")
+        c3.metric("Units used", f"{cap_table['units_used'].sum():.0f}")
+        c4.metric(f"Places left at {level_pick}",
+                  int(cap_table[f"places_left_{level_pick}"].sum()))
+        st.dataframe(cap_table, width="stretch", height=280)
+        st.download_button("Download the register as CSV", to_csv_bytes(cap_table),
+                           "supervisor_register.csv", "text/csv")
+
+        st.divider()
+        st.markdown("**Edit an individual supervisor**")
+        st.caption("Use this when somebody agrees to take two more, goes on leave, or asks for "
+                   "a ceiling on one level. Edits are written straight to the register and "
+                   "recorded in the audit trail.")
+        pick = st.selectbox("Supervisor",
+                            [f"{r['name']} ({r['supervisor_id']})" for _, r in reg.iterrows()])
+        sid = pick.rsplit("(", 1)[1].rstrip(")")
+        current = store.data["supervisors"][sid]
+        e1, e2, e3, e4 = st.columns(4)
+        new_allow = e1.number_input("Allowance (units)", 0.0, 60.0,
+                                    float(current.get("allowance_units", 0)), 0.5)
+        new_min = e2.number_input("Minimum load", 0, 20, int(current.get("min_load", 0)))
+        new_avail = e3.selectbox("Available this session", [1, 0],
+                                 index=0 if int(current.get("available", 1)) == 1 else 1,
+                                 format_func=lambda x: "Yes" if x else "No")
+        caps = current.get("level_caps") or {}
+        new_cap = e4.number_input(f"Cap at {level_pick}, 0 for none", 0, 40,
+                                  int(caps.get(level_pick, 0) or 0))
+        if st.button("Save this supervisor"):
+            changes = {"allowance_units": float(new_allow), "min_load": int(new_min),
+                       "available": int(new_avail)}
+            if new_cap:
+                changes[f"cap_{level_pick}"] = int(new_cap)
+            _, err = guarded(store.update_supervisor, sid, changes)
+            st.error(err) if err else st.success(f"{current.get('name', sid)} updated")
+
+        with st.expander("Audit trail"):
+            st.dataframe(store.audit_trail().tail(200), width="stretch", height=240)
+
+# ---------------------------------------------------------------------------
+# Tab 2: students and conflicts
+# ---------------------------------------------------------------------------
+
+with tab_students:
+    store = get_store()
+    st.subheader("Student submissions")
+    st.caption("Required columns: student_id, project_title, abstract. Strongly recommended: "
+               "level, being UG or PGT, and programme, since rounds are organised around them. "
+               "Optional: project_name, areas, methods, references, preferred_supervisor_id, "
+               "locked_supervisor_id.")
+    f_stu = st.file_uploader("Upload the student file", type=["csv", "xlsx"], key="stu_up")
+    if st.button("Load the sample student file"):
+        st.session_state.students = pd.read_csv("sample_students.csv", dtype=str).fillna("")
+    if f_stu is not None:
+        st.session_state.students = read_table(f_stu)
 
     st.divider()
-    st.subheader("利益冲突禁配表（可选）")
-    st.caption("两列 student_id 与 supervisor_id，外加 reason 备查。"
-               "亲属关系、申诉当事人、纪律委员会成员这类情况放在这里，"
-               "它们是硬性排除而不是扣分，不应该混进匹配分里。")
-    f_block = st.file_uploader("上传禁配表", type=["csv", "xlsx"], key="blk_up")
-    if st.button("载入示例禁配表"):
-        st.session_state.blocked_pairs = pd.read_csv("sample_blocked_pairs.csv", dtype=str).fillna("")
-    if f_block is not None:
-        st.session_state.blocked_pairs = read_table(f_block)
-    if st.session_state.blocked_pairs is not None:
-        st.dataframe(st.session_state.blocked_pairs, width="stretch")
+    st.subheader("Conflicts of interest")
+    st.caption("Two columns, student_id and supervisor_id, plus a reason for the record. A "
+               "declared family relationship, a previous appeal, a seat on the student's "
+               "discipline panel: these are questions of eligibility rather than of fit, so "
+               "they are excluded outright rather than folded into the match score, where a "
+               "generous tolerance could quietly override them.")
+    f_conf = st.file_uploader("Upload the conflicts file", type=["csv", "xlsx"], key="conf_up")
+    if st.button("Load the sample conflicts file"):
+        st.session_state.conflicts = pd.read_csv("sample_conflicts.csv", dtype=str).fillna("")
+    if f_conf is not None:
+        st.session_state.conflicts = read_table(f_conf)
+    if st.session_state.conflicts is not None:
+        st.dataframe(st.session_state.conflicts, width="stretch")
 
-    sup, stu = st.session_state.supervisors, st.session_state.students
-    if sup is not None and stu is not None:
-        sup = sup.copy()
-        sup["workload"] = pd.to_numeric(sup["workload"], errors="coerce").fillna(0).astype(int)
-        if "min_load" in sup.columns:
-            sup["min_load"] = pd.to_numeric(sup["min_load"], errors="coerce").fillna(0).astype(int)
-        if "available" in sup.columns:
-            sup["available"] = pd.to_numeric(sup["available"], errors="coerce").fillna(1).astype(int)
-        st.session_state.supervisors = sup
+    stu = st.session_state.students
+    reg = store.register_dataframe()
+    if stu is not None and len(reg):
+        st.divider()
+        committed = store.committed_students()
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Students in file", len(stu))
+        c2.metric("Already committed", len(committed & set(stu["student_id"])))
+        c3.metric("Still to place", len(set(stu["student_id"]) - committed))
+        if "level" in stu.columns and "programme" in stu.columns:
+            st.dataframe(stu.groupby(["level", "programme"]).size()
+                         .reset_index(name="students"), width="stretch")
+        check = reg.copy()
+        check["workload"] = 0
+        issues = [i for i in mc.validate_inputs(stu, check) if "capacity" not in i.lower()]
+        for msg in issues:
+            st.warning(msg)
+        if not issues:
+            st.success("The student file passes its checks")
+        st.divider()
+        st.subheader("What the proposals will require")
+        st.caption("Read straight from the titles and abstracts, with no model involved. "
+                   "Primary data collection and human participants point to ethics approval, "
+                   "and restricted data or company access points to something the office will "
+                   "have to confirm. February is a considerably better time to discover either "
+                   "than June.")
+        if st.button("Scan the proposals"):
+            st.session_state.requirements = ta.requirements_table(stu)
+        req = st.session_state.requirements
+        if req is not None and len(req):
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Ethics review likely", int(req["ethics_review_likely"].sum()))
+            c2.metric("Data access to confirm", int(req["needs_data_access_check"].sum()))
+            c3.metric("Median proposal length (words)", int(req["word_count"].median()))
+            st.dataframe(req[req["requirements"] != ""], width="stretch", height=240)
 
-        issues = mc.validate_inputs(stu, sup)
-        if issues:
-            for msg in issues:
-                st.warning(msg)
-        else:
-            st.success("数据检查通过")
-
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("学生人数", len(stu))
-        c2.metric("导师人数", len(sup))
-        c3.metric("总容量", int(sup["workload"].sum()))
-        c4.metric("容量盈余", int(sup["workload"].sum()) - len(stu))
-
-        st.markdown("**各组容量对比**")
-        by_group = sup.groupby("group").agg(导师数=("supervisor_id", "count"),
-                                            总容量=("workload", "sum")).reset_index()
-        st.dataframe(by_group, width="stretch")
-
-        with st.expander("查看导师表"):
-            st.dataframe(sup, width="stretch")
-        with st.expander("查看学生表"):
-            st.dataframe(stu, width="stretch")
+        with st.expander("View the student file"):
+            st.dataframe(stu, width="stretch", height=300)
 
 # ---------------------------------------------------------------------------
-# Tab 2: scoring
+# Tab 3: matching scores
 # ---------------------------------------------------------------------------
 
 with tab_score:
-    if st.session_state.supervisors is None or st.session_state.students is None:
-        st.info("先在①载入两张表")
+    store = get_store()
+    reg = store.register_dataframe()
+    if st.session_state.students is None or not len(reg):
+        st.info("Seed the register in ① and load students in ②")
     else:
-        sup = st.session_state.supervisors
         stu = st.session_state.students
 
-        st.subheader("A. 用 ELM 标准化学生提交（可选但建议）")
-        st.caption("学生自己填的 areas 和 methods 往往词汇混乱，同一个方法能写出十种说法。"
-                   "这一步把自由文本映射到受控词表，绝大部分 mismatch 是在这里消掉的，"
-                   "而不是在优化模型里。学生的姓名与学号不会进入请求，只送匿名化之后的题目与摘要。")
-        area_vocab = st.text_area("研究领域词表", ";".join(DEFAULT_AREA_VOCAB), height=80)
-        method_vocab = st.text_area("研究方法词表", ";".join(DEFAULT_METHOD_VOCAB), height=80)
+        st.subheader("A. Standardise submissions with ELM, optional but recommended")
+        st.caption("Students describe the same method in a dozen different ways, and most "
+                   "mismatch originates there rather than in the optimisation. This step maps "
+                   "free text onto a controlled vocabulary and rates how specific each topic "
+                   "is. Names and student numbers never enter a prompt: only a session token, "
+                   "the title and the abstract are sent.")
+        area_vocab = st.text_area("Area vocabulary", ";".join(DEFAULT_AREA_VOCAB), height=80)
+        method_vocab = st.text_area("Method vocabulary", ";".join(DEFAULT_METHOD_VOCAB), height=80)
 
-        if st.button("运行 ELM 抽取", disabled=not elm_ready):
+        with st.expander("Exactly what leaves this machine", expanded=False):
+            st.caption("Students are identified by a sequence number issued here, not by their "
+                       "student number, and supervisors by a code rather than by name. Titles "
+                       "and abstracts are scanned for matriculation numbers and email addresses "
+                       "first. The mapping from code back to person stays in this process and "
+                       "is never written to disk.")
+            preview_pseudo = elm.Pseudonymiser()
+            demo_student = elm.student_payload(stu.iloc[0].to_dict(), preview_pseudo)
+            demo_sup = elm.supervisor_payload(reg.iloc[0].to_dict(), preview_pseudo)
+            st.code(json.dumps({"student": demo_student, "supervisor": demo_sup},
+                               indent=2, ensure_ascii=False), language="json")
+            mapping = st.session_state.pseudo.mapping_table()
+            if mapping:
+                st.download_button("Download the code mapping for your own records",
+                                   to_csv_bytes(pd.DataFrame(mapping)),
+                                   "code_mapping.csv", "text/csv")
+
+        if st.button("Run ELM extraction", disabled=not elm_ready):
             client = elm.ELMClient(elm_cfg)
             pseudo = st.session_state.pseudo
-            submissions = []
-            for _, row in stu.iterrows():
-                submissions.append({
-                    "anon_id": pseudo.token(row["student_id"]),
-                    "project_title": row.get("project_title", ""),
-                    "project_name": row.get("project_name", ""),
-                    "abstract": row.get("abstract", ""),
-                    "references": row.get("references", ""),
-                })
-            bar = st.progress(0.0, text="正在抽取")
-            def _cb(done, total):
-                bar.progress(done / total, text=f"正在抽取 {done}/{total}")
+            submissions = [elm.student_payload(row.to_dict(), pseudo)
+                           for _, row in stu.iterrows()]
+            bar = st.progress(0.0, text="Extracting")
             out = client.map_parallel(
-                lambda s: elm.extract_profile(client, s,
-                                              mc.split_tags(area_vocab),
+                lambda s: elm.extract_profile(client, s, mc.split_tags(area_vocab),
                                               mc.split_tags(method_vocab)),
-                submissions, progress=_cb)
+                submissions,
+                progress=lambda d, t: bar.progress(d / t, text=f"Extracting {d}/{t}"))
             bar.empty()
-
-            extracted = pd.DataFrame([{
-                "student_id": pseudo.real(o.get("anon_id", "")) or "",
+            st.session_state.extracted = pd.DataFrame([{
+                "student_id": pseudo.real(o.get("student_code", "")) or "",
                 "llm_areas": ";".join(o.get("areas", []) or []),
                 "llm_methods": ";".join(o.get("methods", []) or []),
                 "clarity": o.get("clarity"),
+                "method_confidence": o.get("method_confidence", ""),
                 "flags": ";".join(o.get("feasibility_flags", []) or []),
                 "summary": o.get("one_line_summary", ""),
             } for o in out if isinstance(o, dict)])
-            st.session_state.extracted = extracted
-            st.success(f"完成 {len(extracted)} 条")
+            st.success(f"{len(st.session_state.extracted)} submissions processed")
 
         if st.session_state.extracted is not None:
             ext = st.session_state.extracted
             st.dataframe(ext, width="stretch", height=240)
             vague = ext[pd.to_numeric(ext["clarity"], errors="coerce") <= 2]
             if len(vague):
-                st.warning(f"{len(vague)} 位学生的选题清晰度不足，建议在分配之前退回补充，"
-                           "这些人无论算法怎么跑都会产生 mismatch")
-            if st.button("把抽取结果并入学生表"):
+                st.warning(f"{len(vague)} submissions are too vague to supervise as written. "
+                           "Returning these for more detail before the round runs will do more "
+                           "for the outcome than any adjustment to the model.")
+            if st.button("Merge the extracted tags into the student file"):
                 merged = stu.merge(ext[["student_id", "llm_areas", "llm_methods"]],
                                    on="student_id", how="left")
                 merged["areas"] = np.where(merged["llm_areas"].fillna("") != "",
@@ -260,20 +415,50 @@ with tab_score:
                 merged["methods"] = np.where(merged["llm_methods"].fillna("") != "",
                                              merged["llm_methods"], merged.get("methods", ""))
                 st.session_state.students = merged.drop(columns=["llm_areas", "llm_methods"])
-                st.success("已并入，下面重新计算分数")
+                st.success("Merged. Recalculate the score matrix below.")
 
         st.divider()
-        st.subheader("B. 规则打分")
-        c1, c2, c3, c4, c5 = st.columns(5)
-        w_area = c1.slider("研究领域", 0.0, 1.0, 0.40, 0.05)
-        w_method = c2.slider("研究方法", 0.0, 1.0, 0.30, 0.05)
-        w_text = c3.slider("文本相似", 0.0, 1.0, 0.20, 0.05)
-        w_pref = c4.slider("学生意向", 0.0, 1.0, 0.05, 0.05)
-        w_group = c5.slider("同组加分", 0.0, 1.0, 0.05, 0.05)
+        st.subheader("B. Method taxonomy")
+        st.caption("Undergraduates in particular can often place their project as qualitative "
+                   "or quantitative and go no further, while supervisors describe themselves in "
+                   "specific techniques. Without a hierarchy the two vocabularies never "
+                   "intersect and every such student scores zero against everybody, which the "
+                   "optimiser then reports as a shortage of supervisors that does not exist. A "
+                   "student who names a technique still scores above one who names only the "
+                   "paradigm, so precision is rewarded without vagueness being fatal.")
+        default_tax = "\n".join(f"{k}: {'; '.join(v)}"
+                                for k, v in mc.DEFAULT_METHOD_TAXONOMY.items())
+        tax_raw = st.text_area("One line per paradigm, in the form paradigm: method; method",
+                               st.session_state.taxonomy_raw or default_tax, height=120)
+        st.session_state.taxonomy_raw = tax_raw
+        tax_map = {}
+        for line in tax_raw.splitlines():
+            if ":" in line:
+                head, tail = line.split(":", 1)
+                tax_map[head.strip().lower()] = mc.split_tags(tail)
+        taxonomy = mc.MethodTaxonomy(tax_map or None)
+
+        st.divider()
+        st.subheader("C. Rule-based scoring")
+        c1, c2, c3 = st.columns(3)
+        w_area = c1.slider("Research area", 0.0, 1.0, 0.32, 0.02)
+        w_method = c2.slider("Method", 0.0, 1.0, 0.24, 0.02)
+        w_text = c3.slider("Text similarity", 0.0, 1.0, 0.16, 0.02)
+        c4, c5, c6 = st.columns(3)
+        w_phrase = c4.slider("Proposal key phrases", 0.0, 1.0, 0.18, 0.02,
+                             help="How much of the student's own distinctive wording the "
+                                  "supervisor's profile contains")
+        w_pref = c5.slider("Student preference", 0.0, 1.0, 0.05, 0.05)
+        w_group = c6.slider("Same group", 0.0, 1.0, 0.05, 0.05)
+        latent_share = st.slider("Share of text similarity taken from the latent space",
+                                 0.0, 1.0, 0.5, 0.1,
+                                 help="Surface overlap misses a proposal that says stock levels "
+                                      "where a profile says inventory. Reducing the "
+                                      "term-document matrix recovers much of that.")
 
         syn_raw = st.text_area(
-            "同义词映射，一行一条，格式 原词=规范词",
-            "ml=machine learning\nai=machine learning\nstats=regression\n运筹=optimisation",
+            "Synonyms, one per line, in the form variant=canonical",
+            "ml=machine learning\nai=machine learning\nstats=regression\nor=optimisation",
             height=100)
         synonyms = {}
         for line in syn_raw.splitlines():
@@ -281,126 +466,146 @@ with tab_score:
                 a, b = line.split("=", 1)
                 synonyms[a.strip().lower()] = b.strip().lower()
 
-        if st.button("计算分数矩阵", type="primary"):
-            weights = mc.ScoreWeights(w_area, w_method, w_text, w_pref, w_group)
+        if st.button("Calculate the score matrix", type="primary"):
+            weights = mc.ScoreWeights(w_area, w_method, w_text, w_phrase, w_pref, w_group)
             score, comps = mc.build_score_matrix(
-                st.session_state.students, st.session_state.supervisors,
-                weights=weights, synonyms=synonyms,
-                llm_scores=st.session_state.llm_scores,
-                llm_blend=0.3 if st.session_state.llm_scores is not None else 0.0)
+                st.session_state.students, reg, weights=weights, synonyms=synonyms,
+                taxonomy=taxonomy, latent_share=latent_share)
             st.session_state.score = score
             st.session_state.components = comps
-            st.success(f"完成，矩阵规模 {score.shape[0]} × {score.shape[1]}")
+            st.success(f"Done: {score.shape[0]} students by {score.shape[1]} supervisors")
 
         if st.session_state.score is not None:
-            score = st.session_state.score
-            best = score.max(axis=1)
+            best = st.session_state.score.max(axis=1)
             c1, c2, c3 = st.columns(3)
-            c1.metric("最佳匹配分中位数", f"{np.median(best):.3f}")
-            c2.metric("最佳匹配分最低值", f"{best.min():.3f}")
-            c3.metric("最佳分低于 0.3 的学生", int((best < 0.3).sum()))
-            st.caption("最佳匹配分很低的学生是真正的结构性问题，"
-                       "说明导师池里没有人做这个方向，这是招聘或课题引导的问题，不是分配算法的问题。")
-            hist = pd.DataFrame({"每位学生的最佳匹配分": best})
+            c1.metric("Median best match", f"{np.median(best):.3f}")
+            c2.metric("Lowest best match", f"{best.min():.3f}")
+            c3.metric("Students whose best match is below 0.3", int((best < 0.3).sum()))
+            st.caption("A student whose best available match is very low is a structural problem "
+                       "rather than an allocation one, since nobody in the register works in "
+                       "that area. That is a matter for recruitment or for steering topics, and "
+                       "no tolerance setting will repair it.")
             st.bar_chart(np.histogram(best, bins=20, range=(0, 1))[0])
 
+            comps = st.session_state.components
+            if comps and comps.get("student_phrases"):
+                st.markdown("**Key phrases taken from each proposal**")
+                st.caption("These drive part of the score and, more usefully, they appear "
+                           "against each pairing as the evidence for it, so that a decision can "
+                           "be explained in the student's own words rather than as a number.")
+                phrase_table = pd.DataFrame({
+                    "student_id": st.session_state.students["student_id"],
+                    "project_title": st.session_state.students["project_title"],
+                    "key_phrases": ["; ".join(p) for p in comps["student_phrases"]],
+                })
+                st.dataframe(phrase_table, width="stretch", height=240)
+                empty = int(sum(1 for p in comps["student_phrases"] if not p))
+                if empty:
+                    st.warning(f"{empty} proposals yielded no distinctive phrases at all, which "
+                               "usually means the text is too short or too generic to match on.")
+
 # ---------------------------------------------------------------------------
-# Tab 3: allocation
+# Tab 4: allocation round
 # ---------------------------------------------------------------------------
 
 with tab_alloc:
-    if st.session_state.score is None:
-        st.info("先在②计算分数矩阵")
+    store = get_store()
+    reg = store.register_dataframe()
+    if st.session_state.score is None or not len(reg):
+        st.info("Calculate the score matrix in ③ first")
     else:
-        sup = st.session_state.supervisors
         stu_all = st.session_state.students
         score_all = st.session_state.score
-        ledger = get_ledger()
 
-        st.subheader("本轮范围")
-        st.caption("按 programme 分批时，后跑的批次面对的是前面剩下的容量，"
-                   "所以下面的容量来源和预留策略决定了这一批会不会把好导师吃干净。")
-
-        prog_col = "programme" if "programme" in stu_all.columns else None
-        committed = ledger.committed_students()
-        c1, c2 = st.columns([2, 1])
-        if prog_col:
-            all_progs = sorted(stu_all[prog_col].astype(str).unique())
-            chosen_progs = c1.multiselect("本轮要安排的 programme", all_progs, default=all_progs)
+        st.subheader("Scope of this round")
+        st.caption("A round covers one level and any number of programmes within it. Holding a "
+                   "round to a single level is what allows a unit allowance to be converted into "
+                   "a clean headcount ceiling, which is in turn what keeps the relaxation "
+                   "integral and the solve fast.")
+        levels = sorted(store.level_weights.keys())
+        has_level = "level" in stu_all.columns
+        c1, c2, c3 = st.columns([1, 2, 1])
+        level = c1.selectbox("Level", levels)
+        if has_level and "programme" in stu_all.columns:
+            progs = sorted(stu_all.loc[stu_all["level"].astype(str) == level, "programme"]
+                           .astype(str).unique())
         else:
-            chosen_progs = []
-            c1.info("学生表没有 programme 列，本轮按全体学生处理")
-        skip_committed = c2.checkbox("排除台账中已定的学生", value=True)
+            progs = []
+            c2.info(f"No level column in the student file, so every student is treated as {level}")
+        chosen = c2.multiselect("Programmes in this round", progs, default=progs)
+        skip_committed = c3.checkbox("Exclude students already committed", value=True)
 
         mask = np.ones(len(stu_all), dtype=bool)
-        if prog_col and chosen_progs:
-            mask &= stu_all[prog_col].astype(str).isin(chosen_progs).to_numpy()
+        if has_level:
+            mask &= (stu_all["level"].astype(str) == level).to_numpy()
+        if chosen:
+            mask &= stu_all["programme"].astype(str).isin(chosen).to_numpy()
+        committed = store.committed_students()
         if skip_committed and committed:
             mask &= ~stu_all["student_id"].astype(str).isin(committed).to_numpy()
         idx = np.where(mask)[0]
         stu = stu_all.iloc[idx].reset_index(drop=True)
         score = score_all[idx, :]
 
-        upcoming = 0
-        if prog_col and chosen_progs:
-            rest = ~stu_all[prog_col].astype(str).isin(chosen_progs)
-            if skip_committed and committed:
-                rest &= ~stu_all["student_id"].astype(str).isin(committed)
-            upcoming = int(rest.sum())
+        if committed:
+            outstanding = (~stu_all["student_id"].astype(str).isin(committed)).to_numpy()
+        else:
+            outstanding = np.ones(len(stu_all), dtype=bool)
+        upcoming = int((outstanding & ~mask).sum())
 
-        st.subheader("容量")
+        st.subheader("Capacity")
         c1, c2, c3 = st.columns(3)
-        cap_source = c1.radio("容量来源", ["台账剩余", "年度 workload"], index=0,
-                              help="分批运行时用台账剩余，重跑整届时用年度 workload")
-        reservation = c2.radio("为后续批次预留", ["proportional", "use_all"], index=0,
-                               format_func=lambda x: {"proportional": "按人数比例预留",
-                                                      "use_all": "本轮用尽"}[x],
-                               help="本轮之后还有学生未安排时，按比例预留可以避免最后一批无人可配")
-        floor_reserve = c3.number_input("每位导师至少保留", 0, 10, 0,
-                                        help="预留时给每位导师保底留出的名额")
+        reservation = c1.radio("Reserve for later rounds", ["proportional", "use_all"], index=0,
+                               format_func=lambda x: {"proportional": "In proportion to students",
+                                                      "use_all": "Let this round use everything"}[x],
+                               help="Whoever runs first takes the best-matched supervisors. "
+                                    "Reserving protects the cohort allocated last.")
+        floor_reserve = c2.number_input("Minimum places kept per supervisor", 0, 10, 0)
+        c3.metric(f"Units per {level} dissertation", store.level_weights.get(level, 1.0))
 
-        annual = sup["workload"].astype(float).to_numpy()
-        remaining = ledger.remaining_capacity(sup) if cap_source == "台账剩余" else annual
-        capacity = rd.reserve_capacity(remaining, len(stu), upcoming,
-                                       mode=reservation,
-                                       floor_per_supervisor=int(floor_reserve))
+        level_capacity = store.capacity_for_round(reg, level)
+        capacity = stx.reserve_capacity(level_capacity, len(stu), upcoming, mode=reservation,
+                                        floor_per_supervisor=int(floor_reserve))
         c1, c2, c3, c4 = st.columns(4)
-        c1.metric("本轮学生", len(stu))
-        c2.metric("后续待安排", upcoming)
-        c3.metric("可用容量", int(remaining.sum()))
-        c4.metric("本轮开放容量", int(capacity.sum()))
+        c1.metric("Students in this round", len(stu))
+        c2.metric("Still to place afterwards", upcoming)
+        c3.metric(f"Places available at {level}", int(level_capacity.sum()))
+        c4.metric("Places opened to this round", int(capacity.sum()))
         if capacity.sum() < len(stu):
-            st.warning("本轮开放容量小于本轮学生数，必然出现未分配")
+            st.warning("Fewer places are open than there are students in the round, so some "
+                       "will be left unassigned by construction.")
 
-        with st.expander("组级上限，用于避免某一个组被热门选题淹没"):
-            use_group_caps = st.checkbox("启用组级上限", value=False)
+        with st.expander("Group ceilings, to stop one group absorbing a popular cohort"):
+            use_group_caps = st.checkbox("Apply group ceilings", value=False)
             group_caps = {}
             if use_group_caps:
-                groups = sorted(sup["group"].astype(str).unique())
+                groups = sorted(reg["group"].astype(str).unique())
                 cols = st.columns(min(3, len(groups)))
                 for k, g in enumerate(groups):
-                    default = int(math.ceil(len(stu) / len(groups) * 1.4))
+                    default = int(math.ceil(len(stu) / max(len(groups), 1) * 1.4))
                     group_caps[g] = cols[k % len(cols)].number_input(
-                        g, 0, len(stu), default, key=f"gc_{g}")
-                st.caption("组级约束与导师容量是嵌套的层状结构，仍然构成网络流，"
-                           "所以加上它不会破坏整数性，求解速度也不受影响。")
+                        g, 0, max(len(stu), 1), default, key=f"gc_{level}_{g}")
+                st.caption("Supervisors partition into groups, so these ceilings nest inside the "
+                           "individual ones and the model remains a flow network. Integrality "
+                           "and solve time are unaffected.")
 
-        st.subheader("容差与门槛")
+        st.subheader("Thresholds and tolerance")
         c1, c2, c3 = st.columns(3)
-        hard_floor = c1.slider("硬下限 hard floor", 0.0, 1.0, 0.15, 0.01,
-                               help="低于此分的配对根本不进入模型，宁可让学生留待人工处理")
-        good_threshold = c2.slider("good match 门槛", 0.0, 1.0, 0.50, 0.01,
-                                   help="达到此分视为合格匹配")
-        tolerance = c3.slider("mismatch tolerance", 0.0, 1.0, 0.10, 0.01,
-                              help="允许低于合格门槛的分配占比上限")
-
+        hard_floor = c1.slider("Hard floor", 0.0, 1.0, 0.15, 0.01,
+                               help="Pairings below this score never enter the model at all")
+        good_threshold = c2.slider("Good-match threshold", 0.0, 1.0, 0.50, 0.01)
+        tolerance = c3.slider("Mismatch tolerance", 0.0, 1.0, 0.10, 0.01,
+                              help="Share of allocations permitted to fall below the "
+                                   "good-match threshold")
         c4, c5, c6 = st.columns(3)
-        top_k = c4.slider("每位学生保留候选导师数", 5, 60, 25)
-        restrict_group = c5.checkbox("限定在学生指定的组内分配", value=False)
-        unassigned_penalty = c6.slider("未分配惩罚", 1.0, 20.0, 5.0, 0.5,
-                                       help="调高则宁可勉强配也不留空，调低则宁可留空交人工")
+        top_k = c4.slider("Candidate supervisors kept per student", 5, 60, 25)
+        restrict_group = c5.checkbox("Confine students to their stated group", value=False)
+        unassigned_penalty = c6.slider("Penalty for leaving a student unassigned",
+                                       1.0, 20.0, 5.0, 0.5,
+                                       help="High values prefer a weak match to none, low values "
+                                            "prefer to hand the student to a human")
 
-        sup_index = {str(s_): j for j, s_ in enumerate(sup["supervisor_id"])}
+        sup_index = {str(s): j for j, s in enumerate(reg["supervisor_id"])}
         locked = {}
         if "locked_supervisor_id" in stu.columns:
             for i, v in enumerate(stu["locked_supervisor_id"]):
@@ -408,168 +613,193 @@ with tab_alloc:
                 if j is not None:
                     locked[i] = j
             if locked:
-                st.info(f"检测到 {len(locked)} 条人工锁定，这些配对被强制保留")
+                st.info(f"{len(locked)} pairings are locked by the office and will be preserved")
 
-        unavailable = []
-        if "available" in sup.columns:
-            unavailable = [j for j, a in enumerate(sup["available"]) if int(a) == 0]
-            if unavailable:
-                st.info(f"{len(unavailable)} 位导师本届不可用，已从候选中剔除")
+        unavailable = [j for j, a in enumerate(reg["available"]) if int(a) == 0]
+        if unavailable:
+            st.info(f"{len(unavailable)} supervisors are unavailable this session and have been "
+                    "removed from the candidate pool")
 
-        blocked_pairs = set()
-        bp = st.session_state.blocked_pairs
-        if bp is not None and len(bp):
-            stu_pos = {str(s_): i for i, s_ in enumerate(stu["student_id"])}
-            for _, row in bp.iterrows():
+        conflict_pairs = set()
+        conf = st.session_state.conflicts
+        if conf is not None and len(conf):
+            stu_pos = {str(s): i for i, s in enumerate(stu["student_id"])}
+            for _, row in conf.iterrows():
                 i = stu_pos.get(str(row["student_id"]).strip())
                 j = sup_index.get(str(row["supervisor_id"]).strip())
                 if i is not None and j is not None:
-                    blocked_pairs.add((i, j))
-            st.info(f"{len(blocked_pairs)} 条利益冲突禁配在本轮生效")
+                    conflict_pairs.add((i, j))
+            if conflict_pairs:
+                st.info(f"{len(conflict_pairs)} declared conflicts apply to this round")
 
         eligibility = None
-        if "programmes" in sup.columns and prog_col:
-            elig = np.ones((len(stu), len(sup)), dtype=bool)
-            sup_progs = [mc.split_tags(v) for v in sup["programmes"]]
-            stu_progs = [str(v).strip().lower() for v in stu[prog_col]]
+        if "programmes" in reg.columns and "programme" in stu.columns:
+            elig = np.ones((len(stu), len(reg)), dtype=bool)
             restricted = 0
-            for j, allowed_progs in enumerate(sup_progs):
-                if not allowed_progs:
+            stu_progs = [str(v).strip().lower() for v in stu["programme"]]
+            for j, allowed in enumerate([mc.split_tags(v) for v in reg["programmes"]]):
+                if not allowed:
                     continue
                 restricted += 1
                 for i, pg in enumerate(stu_progs):
-                    elig[i, j] = pg in allowed_progs
+                    elig[i, j] = pg in allowed
             if restricted:
                 eligibility = elig
-                st.info(f"{restricted} 位导师限定了可带的 programme，已按此过滤候选")
+                st.info(f"{restricted} supervisors take only certain programmes, and candidates "
+                        "have been filtered accordingly")
 
-        if st.button("运行分配", type="primary"):
+        if st.button("Run this round", type="primary"):
             cand = mc.build_candidates(
                 score, hard_floor=hard_floor, top_k=top_k,
                 restrict_to_group=restrict_group,
                 student_groups=stu.get("preferred_group"),
-                supervisor_groups=sup["group"],
+                supervisor_groups=reg["group"],
                 locked=locked, unavailable=unavailable,
-                blocked_pairs=blocked_pairs, eligibility=eligibility)
+                blocked_pairs=conflict_pairs, eligibility=eligibility)
             params = mc.AllocationParams(
                 good_threshold=good_threshold, tolerance=tolerance,
                 unassigned_penalty=unassigned_penalty,
                 engine=engine, milp_solver=milp_solver)
-            with st.spinner("求解中"):
-                result = mc.allocate(stu, sup, score, cand, params, capacity,
-                                     group_caps if use_group_caps else None)
+            reg_for_run = reg.copy()
+            reg_for_run["workload"] = capacity
+            with st.spinner("Solving"):
+                comps_all = st.session_state.components
+                comps_round = None
+                if comps_all:
+                    comps_round = {
+                        k: (v[idx] if isinstance(v, np.ndarray) else [v[i] for i in idx])
+                        for k, v in comps_all.items()
+                        if k in ("area", "method", "text", "phrase", "student_phrases",
+                                 "phrase_evidence", "student_areas", "student_methods")
+                    }
+                    comps_round["supervisor_areas"] = comps_all["supervisor_areas"]
+                    comps_round["supervisor_methods"] = comps_all["supervisor_methods"]
+                result = mc.allocate(stu, reg_for_run, score, cand, params, capacity,
+                                     group_caps if use_group_caps else None,
+                                     components=comps_round)
             st.session_state.candidates = cand
             st.session_state.result = result
             st.session_state.audit = None
             st.session_state.diagnostics = mc.diagnose_allocation(
-                result, score, cand, stu, sup, capacity)
+                result, score, cand, stu, reg_for_run, capacity)
             st.session_state.round_scope = {
-                "programmes": chosen_progs,
-                "students": len(stu),
+                "level": level, "programmes": chosen, "students": len(stu),
                 "params": {"hard_floor": hard_floor, "good_threshold": good_threshold,
                            "tolerance": tolerance, "top_k": top_k,
-                           "capacity_source": cap_source, "reservation": reservation,
+                           "reservation": reservation, "engine": engine,
                            "group_caps": group_caps if use_group_caps else {},
-                           "engine": engine},
-                "student_ids": stu["student_id"].astype(str).tolist(),
+                           "register_version": store.version},
             }
 
         res = st.session_state.result
         if res is not None:
             c1, c2, c3, c4, c5 = st.columns(5)
-            c1.metric("已分配", res.n_assigned)
-            c2.metric("未分配", res.n_unassigned)
-            c3.metric("低于合格门槛", res.n_below_good)
-            c4.metric("平均匹配分", f"{res.total_score / max(res.n_assigned, 1):.3f}")
-            c5.metric("求解耗时", f"{res.solve_seconds:.2f}s")
+            c1.metric("Assigned", res.n_assigned)
+            c2.metric("Unassigned", res.n_unassigned)
+            c3.metric("Below the good-match threshold", res.n_below_good)
+            c4.metric("Mean match", f"{res.total_score / max(res.n_assigned, 1):.3f}")
+            c5.metric("Solve time", f"{res.solve_seconds:.2f}s")
             for line in res.log:
                 st.caption(line)
 
-            st.markdown("**分配结果**")
+            st.markdown("**Allocation**")
             st.dataframe(res.assignment, width="stretch", height=320)
-
-            st.markdown("**导师负荷，workload 一列是本轮开放的容量而非年度总量**")
-            st.dataframe(res.loads.sort_values("spare"), width="stretch", height=260)
+            st.markdown("**Load, measured against the places opened to this round rather than "
+                        "the annual allowance**")
+            st.dataframe(res.loads.sort_values("spare"), width="stretch", height=240)
 
             diag = st.session_state.diagnostics
             if diag is not None and len(diag):
-                st.markdown("**申诉预案**")
-                st.caption("wasteful 是本可以配给更合适且仍有余量的导师，通常由组级上限或下限约束造成；"
-                           "blocking 是更合适的导师已满但带着匹配更弱的学生，这是两个学生一对话就会发现的不公平感来源。"
-                           "两类都属于模型的正常产物，列出来是为了 office 在被问到时答得出所以然。")
+                st.markdown("**Prepared answers for queries**")
+                st.caption("A wasteful pairing is one where a better-suited supervisor still had "
+                           "room, which happens legitimately when a minimum load or a group "
+                           "ceiling binds. A blocking pairing is one where the better-suited "
+                           "supervisor was full but is carrying a weaker match, which is what "
+                           "two students notice as soon as they compare notes. Both are normal "
+                           "products of the model, listed here so that the office can explain "
+                           "them rather than meet them cold.")
                 st.dataframe(diag, width="stretch", height=220)
 
             st.divider()
-            st.subheader("容差前沿")
-            if st.button("计算前沿曲线"):
-                params = mc.AllocationParams(
-                    good_threshold=good_threshold, tolerance=tolerance,
-                    unassigned_penalty=unassigned_penalty, engine="lp")
-                frontier = mc.tolerance_frontier(
-                    stu, sup, score, st.session_state.candidates, params, capacity=capacity)
+            if st.button("Trace the tolerance frontier"):
+                params = mc.AllocationParams(good_threshold=good_threshold, tolerance=tolerance,
+                                             unassigned_penalty=unassigned_penalty, engine="lp")
+                reg_for_run = reg.copy()
+                reg_for_run["workload"] = capacity
+                frontier = mc.tolerance_frontier(stu, reg_for_run, score,
+                                                 st.session_state.candidates, params,
+                                                 capacity=capacity)
                 st.dataframe(frontier, width="stretch")
                 st.line_chart(frontier.set_index("tolerance")[["mean_score"]])
 
 # ---------------------------------------------------------------------------
-# Tab 4: AI double check
+# Tab 5: AI review
 # ---------------------------------------------------------------------------
 
 with tab_audit:
-    if st.session_state.result is None:
-        st.info("先在③跑出分配结果")
+    store = get_store()
+    res = st.session_state.result
+    if res is None:
+        st.info("Run a round in ④ first")
     else:
-        res = st.session_state.result
-        sup = st.session_state.supervisors
-        stu = st.session_state.students
+        reg = store.register_dataframe()
+        stu_all = st.session_state.students
+        scope = st.session_state.round_scope or {}
+        level = scope.get("level", "UG")
 
-        st.subheader("AI 复核")
-        st.caption("模型在这里只做审核，不做决定：它读已经定下来的配对，"
-                   "对每一条给出 ok / query / reject 与理由，由 office 决定是否人工干预。"
-                   "reject 的条目可以写进 locked 之外的黑名单，调整之后回到③重跑。")
-
-        scope = st.radio("复核范围",
-                         ["只看低于合格门槛的配对", "分数最低的 N 条", "全部配对"],
-                         index=0)
+        st.subheader("AI review of the completed round")
+        st.caption("The model reviews rather than decides. It reads pairings that are already "
+                   "settled and returns ok, query or reject with a reason, and the office "
+                   "decides what to act on. The standard applied differs by level, since a "
+                   "taught masters topic is expected to need real methodological depth from the "
+                   "supervisor where an undergraduate one often does not.")
+        scope_choice = st.radio("What to review",
+                                ["Only pairings below the good-match threshold",
+                                 "The N lowest-scoring pairings", "Every pairing"], index=0)
         n_lowest = st.number_input("N", 10, 500, 50, step=10,
-                                   disabled=(scope != "分数最低的 N 条"))
+                                   disabled=(scope_choice != "The N lowest-scoring pairings"))
 
         assigned = res.assignment.dropna(subset=["supervisor_id"])
-        if scope == "只看低于合格门槛的配对":
+        if scope_choice.startswith("Only"):
             target = assigned[assigned["below_good"]]
-        elif scope == "分数最低的 N 条":
+        elif scope_choice.startswith("The N"):
             target = assigned.nsmallest(int(n_lowest), "score")
         else:
             target = assigned
-        st.write(f"待复核 {len(target)} 条")
+        send_keywords = st.checkbox(
+            "Include supervisor keywords in the review", value=False,
+            help="Off by default: a profile written as a list of publication titles identifies "
+                 "the person as surely as their name does. The research areas and methods alone "
+                 "are usually enough for the model to judge fit.")
+        st.write(f"{len(target)} pairings selected")
 
-        if st.button("运行复核", type="primary", disabled=not elm_ready or len(target) == 0):
+        if st.button("Run the review", type="primary",
+                     disabled=not elm_ready or len(target) == 0):
             client = elm.ELMClient(elm_cfg)
             pseudo = st.session_state.pseudo
-            stu_by_id = stu.set_index("student_id")
-            sup_by_id = sup.set_index("supervisor_id")
-
+            stu_by_id = stu_all.set_index("student_id")
+            sup_by_id = reg.set_index("supervisor_id")
             pairs = []
             for _, row in target.iterrows():
-                s = stu_by_id.loc[row["student_id"]]
-                t = sup_by_id.loc[row["supervisor_id"]]
+                srow = stu_by_id.loc[row["student_id"]].to_dict()
+                srow["student_id"] = row["student_id"]
+                trow = sup_by_id.loc[row["supervisor_id"]].to_dict()
+                trow["supervisor_id"] = row["supervisor_id"]
                 pairs.append({
-                    "anon_id": pseudo.token(row["student_id"]),
-                    "title": elm.strip_identifiers(str(s.get("project_title", ""))),
-                    "abstract": elm.strip_identifiers(str(s.get("abstract", "")))[:1200],
-                    "supervisor_areas": str(t.get("research_areas", "")),
-                    "supervisor_methods": str(t.get("methods", "")),
-                    "supervisor_keywords": str(t.get("keywords", ""))[:300],
-                    "rule_score": float(row["score"]),
+                    **elm.student_payload(srow, pseudo, level=level),
+                    "supervisor": elm.supervisor_payload(trow, pseudo,
+                                                         include_keywords=send_keywords),
+                    "rule_score": round(float(row["score"]), 4),
+                    "evidence": str(row.get("evidence", "")),
                 })
-            bar = st.progress(0.0, text="复核中")
-            def _cb(done, total):
-                bar.progress(done / total, text=f"复核中 {done}/{total}")
-            reviews = elm.audit_allocation(client, pairs, batch_size=8, progress=_cb)
+            bar = st.progress(0.0, text="Reviewing")
+            reviews = elm.audit_allocation(
+                client, pairs, batch_size=8,
+                progress=lambda d, t: bar.progress(d / t, text=f"Reviewing {d}/{t}"))
             bar.empty()
-
             audit_df = pd.DataFrame(reviews)
             if len(audit_df):
-                audit_df["student_id"] = audit_df["anon_id"].map(pseudo.real)
+                audit_df["student_id"] = audit_df["student_code"].map(pseudo.real)
                 audit_df = audit_df.merge(
                     assigned[["student_id", "supervisor_name", "score", "project_title"]],
                     on="student_id", how="left")
@@ -585,179 +815,209 @@ with tab_audit:
             c2.metric("query", int(counts.get("query", 0)))
             c3.metric("reject", int(counts.get("reject", 0)))
             st.dataframe(audit_df.sort_values("verdict"), width="stretch", height=380)
-            st.caption("模型的 reject 是提示而不是裁决，"
-                       "它看不到导师的完整履历，误判的成本落在 office 身上，"
-                       "所以这一列请当作人工复查的排序依据来用。")
+            st.caption("Treat a reject as a prompt rather than a ruling. The model cannot see a "
+                       "supervisor's full record, and the cost of a wrong rejection falls on the "
+                       "office, so this column is best used to order the manual check.")
 
 # ---------------------------------------------------------------------------
-# Tab 5: round ledger
+# Tab 6: rounds
 # ---------------------------------------------------------------------------
 
 with tab_rounds:
-    ledger = get_ledger()
-    sup = st.session_state.supervisors
+    store = get_store()
+    reg = store.register_dataframe()
 
-    st.subheader("提交本轮")
-    st.caption("提交之后这一轮的配对写入台账，导师剩余容量相应扣减，下一批学生面对的就是扣减后的池子。"
-               "提交前的结果只是草稿，可以反复重跑。")
+    st.subheader("Commit this round")
+    st.caption("Committing writes the pairings into the session file and decrements the "
+               "supervisors' remaining allowance immediately, so that the next round, at either "
+               "level, sees what is genuinely left. Until then the result is a draft and can be "
+               "rerun as often as needed.")
     res = st.session_state.result
     scope = st.session_state.round_scope
     if res is None or scope is None:
-        st.info("③还没有可提交的结果")
+        st.info("There is no result from ④ to commit")
     else:
-        label = st.text_input("本轮名称",
-                              value=("、".join(scope["programmes"]) if scope["programmes"] else "全体")
-                              + f"  {len(res.assignment) - res.n_unassigned} 人")
+        default_label = (f"{scope['level']} · "
+                         + (", ".join(scope["programmes"]) if scope["programmes"] else "all")
+                         + f" · {res.n_assigned} students")
+        label = st.text_input("Label for this round", value=default_label)
         c1, c2 = st.columns([1, 3])
-        if c1.button("提交入台账", type="primary"):
-            ledger.commit(res, label, scope["programmes"], scope["params"])
-            st.session_state.result = None
-            st.session_state.round_scope = None
-            st.success("已提交，导师剩余容量已更新")
-            st.rerun()
-        c2.caption(f"待提交 {res.n_assigned} 条配对，未分配 {res.n_unassigned} 人不会写入台账，"
-                   "他们留在池子里等下一轮或人工处理")
+        if c1.button("Commit", type="primary"):
+            _, err = guarded(store.commit_round, res, label, scope["level"],
+                             scope["programmes"], scope["params"])
+            if err:
+                st.error(err)
+            else:
+                st.session_state.result = None
+                st.session_state.round_scope = None
+                st.success("Committed. Remaining allowances have been updated.")
+                st.rerun()
+        c2.caption(f"{res.n_assigned} pairings will be written. The {res.n_unassigned} unassigned "
+                   "students are not committed and stay in the pool for a later round or for "
+                   "manual handling.")
 
     st.divider()
-    st.subheader("台账状态")
-    if sup is None:
-        st.info("先在①载入导师表")
+    st.subheader("Session position")
+    if not len(reg):
+        st.info("The register is empty")
     else:
-        cap_table = ledger.capacity_table(sup)
+        cap = store.capacity_table(reg)
         c1, c2, c3 = st.columns(3)
-        c1.metric("年度总容量", int(cap_table["workload"].sum()))
-        c2.metric("已占用", int(cap_table["already_assigned"].sum()))
-        c3.metric("剩余", int(cap_table["remaining"].sum()))
-        st.dataframe(cap_table.sort_values("remaining"), width="stretch", height=260)
-        st.download_button("导出剩余容量表 CSV", to_csv_bytes(cap_table),
-                           "remaining_capacity.csv", "text/csv")
-
-        summary = ledger.summary()
+        c1.metric("Allowance (units)", f"{cap['allowance_units'].sum():.0f}")
+        c2.metric("Used", f"{cap['units_used'].sum():.0f}")
+        c3.metric("Left", f"{cap['units_left'].sum():.0f}")
+        st.dataframe(cap.sort_values("units_left"), width="stretch", height=260)
+        summary = store.rounds_summary()
         if len(summary):
-            st.markdown("**已提交轮次**")
+            st.markdown("**Committed rounds**")
             st.dataframe(summary, width="stretch")
 
     st.divider()
-    st.subheader("改动与回滚")
-    st.caption("这里处理的是学期中途一定会发生的事：导师病假或离职、学生换题、两位学生申请对调、"
-               "某一轮跑错参数需要整体撤销。每一种都不需要推翻其他人的安排。")
-
-    if len(ledger.rounds):
+    st.subheader("Amendments")
+    st.caption("These are the things that always happen mid-session: a supervisor goes on sick "
+               "leave or resigns, a student changes topic, two students ask to swap, a round was "
+               "run on the wrong parameters. None of them requires the rest of the session to be "
+               "unpicked.")
+    if len(store.data.get("rounds", [])):
         c1, c2 = st.columns(2)
         with c1:
-            st.markdown("**撤销整轮**")
-            options = {f"{r.label}｜{r.timestamp}｜{len(r.rows)} 人": r.round_id
-                       for r in ledger.rounds}
-            pick = st.selectbox("选择轮次", list(options.keys()))
-            if st.button("撤销这一轮"):
-                ledger.rollback(options[pick])
-                st.success("已撤销，容量释放回池子")
-                st.rerun()
+            st.markdown("**Undo a whole round**")
+            options = {f"{r['label']} · {r['timestamp']} · {len(r['rows'])}": r["round_id"]
+                       for r in store.data["rounds"]}
+            pick = st.selectbox("Round", list(options.keys()))
+            if st.button("Undo this round"):
+                _, err = guarded(store.rollback, options[pick])
+                if err:
+                    st.error(err)
+                else:
+                    st.success("Undone. The capacity has been returned to the register.")
+                    st.rerun()
         with c2:
-            st.markdown("**导师退出**")
-            st.caption("释放该导师名下全部学生，其余配对不动，随后回到③只重跑这些学生")
-            if sup is not None:
-                sup_map = {f"{r['name']}（{r['supervisor_id']}）": r["supervisor_id"]
-                           for _, r in sup.iterrows()}
-                pick_sup = st.selectbox("选择导师", list(sup_map.keys()))
-                if st.button("释放该导师的学生"):
-                    affected = ledger.release_supervisor(sup_map[pick_sup])
-                    st.warning(f"释放 {len(affected)} 位学生：{', '.join(affected[:20])}"
-                               + ("…" if len(affected) > 20 else ""))
+            st.markdown("**Supervisor withdraws**")
+            st.caption("Releases their students only. Every other pairing stands, and the "
+                       "released students can be rerun on their own in ④.")
+            if len(reg):
+                sup_map = {f"{r['name']} ({r['supervisor_id']})": r["supervisor_id"]
+                           for _, r in reg.iterrows()}
+                pick_sup = st.selectbox("Supervisor", list(sup_map.keys()), key="rel_sup")
+                if st.button("Release their students"):
+                    affected, err = guarded(store.release_supervisor, sup_map[pick_sup])
+                    if err:
+                        st.error(err)
+                    else:
+                        st.warning(f"{len(affected)} students returned to the pool: "
+                                   + ", ".join(affected[:20])
+                                   + ("…" if len(affected) > 20 else ""))
 
-        st.markdown("**释放个别学生**")
-        st.caption("学生换题、休学、申请更换导师时用，多个 ID 用逗号或换行分隔")
-        ids_raw = st.text_area("student_id", height=70, key="release_ids")
-        if st.button("释放这些学生"):
-            ids = [x.strip() for x in re.split(r"[,，\s]+", ids_raw) if x.strip()]
-            removed = ledger.release_students(ids)
-            st.success(f"释放 {removed} 条配对，这些学生回到未分配池")
+        st.markdown("**Release individual students**")
+        ids_raw = st.text_area("student_id, separated by commas or new lines", height=70)
+        if st.button("Release these students"):
+            ids = [x.strip() for x in re.split(r"[,\s]+", ids_raw) if x.strip()]
+            removed, err = guarded(store.release_students, ids)
+            st.error(err) if err else st.success(f"{removed} pairings released")
     else:
-        st.info("台账为空")
+        st.info("No rounds have been committed yet")
 
     st.divider()
-    st.subheader("分批的代价")
-    st.caption("把按 programme 顺序分批的结果与一次性联合求解的结果放在一起比。"
-               "联合求解是所有 programme 同一天交材料时能达到的上界，两者之差就是日程安排的价格。"
-               "先跑的批次通常占便宜，最后一批吃亏，预留策略是用来压缩这个差距的。")
-    if (st.session_state.score is None or sup is None
-            or "programme" not in (st.session_state.students.columns if st.session_state.students is not None else [])):
-        st.info("需要学生表带 programme 列，并且已在②算好分数矩阵")
+    st.subheader("The price of running in sequence")
+    st.caption("Cohort-by-cohort allocation is a greedy procedure: whoever runs first takes the "
+               "best-matched supervisors and the last cohort pays for it. This compares the "
+               "sequence against a single joint solve of the same students, which is what the "
+               "office would achieve if every programme submitted on the same day.")
+    if st.session_state.score is None or not len(reg) or st.session_state.students is None:
+        st.info("A score matrix from ③ is needed")
     else:
         stu_all = st.session_state.students
-        all_progs = sorted(stu_all["programme"].astype(str).unique())
-        order = st.multiselect("批次顺序，从先到后", all_progs, default=all_progs)
-        mode = st.radio("预留策略", ["proportional", "use_all"], index=0, horizontal=True,
-                        format_func=lambda x: {"proportional": "按人数比例预留",
-                                               "use_all": "本轮用尽"}[x],
+        col = "programme" if "programme" in stu_all.columns else "level"
+        values = sorted(stu_all[col].astype(str).unique())
+        order = st.multiselect(f"Order of {col}s, first to last", values, default=values)
+        mode = st.radio("Reservation", ["proportional", "use_all"], index=0, horizontal=True,
+                        format_func=lambda x: {"proportional": "In proportion to students",
+                                               "use_all": "Each round uses everything"}[x],
                         key="seqmode")
-        if st.button("测算分批代价") and order:
-            with st.spinner("测算中"):
-                cost = rd.sequencing_cost(
-                    stu_all, sup, st.session_state.score,
+        lvl_for_cost = st.selectbox("Capacity basis", sorted(store.level_weights.keys()),
+                                    key="costlevel")
+        if st.button("Estimate the cost of sequencing") and order:
+            reg_cost = reg.copy()
+            cap_basis = store.capacity_for_round(reg, lvl_for_cost)
+            reg_cost["workload"] = cap_basis
+            with st.spinner("Estimating"):
+                cost = stx.sequencing_cost(
+                    stu_all, reg_cost, st.session_state.score,
                     mc.AllocationParams(good_threshold=0.5, tolerance=0.1, engine="lp"),
-                    "programme", order, reservation=mode)
+                    col, order, capacity=cap_basis, reservation=mode)
             st.dataframe(cost, width="stretch")
-            st.caption("gap 为正表示该 programme 在分批安排下吃亏，"
-                       "把它拿给排在最后的项目主任看比任何口头保证都有用。")
-
+            st.caption("A positive gap means that cohort loses out under the sequence. Showing "
+                       "this to the programme director scheduled last is more persuasive than "
+                       "any assurance.")
 
 # ---------------------------------------------------------------------------
-# Tab 5: export
+# Tab 7: export
 # ---------------------------------------------------------------------------
 
 with tab_export:
+    store = get_store()
+    reg = store.register_dataframe()
     res = st.session_state.result
+
+    st.subheader("This round")
     if res is None:
-        st.info("还没有可导出的结果")
+        st.info("Nothing from ④ to export")
     else:
-        st.subheader("导出")
-        st.download_button("分配结果 CSV", to_csv_bytes(res.assignment),
-                           "allocation.csv", "text/csv")
-        st.download_button("导师负荷 CSV", to_csv_bytes(res.loads),
-                           "supervisor_loads.csv", "text/csv")
+        st.download_button("Allocation (CSV)", to_csv_bytes(res.assignment),
+                           "allocation_round.csv", "text/csv")
+        st.download_button("Supervisor load (CSV)", to_csv_bytes(res.loads),
+                           "round_loads.csv", "text/csv")
         if st.session_state.audit is not None and len(st.session_state.audit):
-            st.download_button("AI 复核报告 CSV", to_csv_bytes(st.session_state.audit),
-                               "ai_audit.csv", "text/csv")
-        if st.session_state.extracted is not None:
-            st.download_button("ELM 抽取结果 CSV", to_csv_bytes(st.session_state.extracted),
-                               "extracted_profiles.csv", "text/csv")
+            st.download_button("AI review (CSV)", to_csv_bytes(st.session_state.audit),
+                               "ai_review.csv", "text/csv")
         if st.session_state.diagnostics is not None and len(st.session_state.diagnostics):
-            st.download_button("申诉预案 CSV", to_csv_bytes(st.session_state.diagnostics),
-                               "diagnostics.csv", "text/csv")
+            st.download_button("Prepared answers (CSV)",
+                               to_csv_bytes(st.session_state.diagnostics),
+                               "query_diagnostics.csv", "text/csv")
+        if st.session_state.extracted is not None:
+            st.download_button("ELM extraction (CSV)", to_csv_bytes(st.session_state.extracted),
+                               "extracted_profiles.csv", "text/csv")
 
-        st.divider()
-        st.subheader("全届汇总，跨所有已提交轮次")
-        _ledger = get_ledger()
-        all_rows = _ledger.committed_rows()
-        if len(all_rows):
-            st.dataframe(all_rows, width="stretch", height=240)
-            st.download_button("全届分配结果 CSV", to_csv_bytes(all_rows),
-                               "allocation_all_rounds.csv", "text/csv")
-            if st.session_state.supervisors is not None:
-                cap = _ledger.capacity_table(st.session_state.supervisors)
-                nxt = st.session_state.supervisors.copy()
-                nxt["workload"] = cap["remaining"].values
-                st.download_button(
-                    "更新 workload 后的导师表 CSV，可直接作为下一轮输入",
-                    to_csv_bytes(nxt), "supervisors_remaining.csv", "text/csv")
-        else:
-            st.info("台账为空，还没有已提交的轮次")
+    st.divider()
+    st.subheader("Whole session")
+    all_rows = store.committed_rows()
+    if len(all_rows):
+        st.dataframe(all_rows, width="stretch", height=260)
+        st.download_button("All committed allocations (CSV)", to_csv_bytes(all_rows),
+                           f"allocations_{store.session.replace('/', '-')}.csv", "text/csv")
+        if len(reg):
+            st.download_button("Register with remaining capacity (CSV)",
+                               to_csv_bytes(store.capacity_table(reg)),
+                               "register_remaining.csv", "text/csv")
+        trail = store.audit_trail()
+        if len(trail):
+            st.download_button("Audit trail (CSV)", to_csv_bytes(trail),
+                               "audit_trail.csv", "text/csv")
+    else:
+        st.info("No rounds have been committed in this session yet")
 
-        st.divider()
-        st.subheader("本次运行的参数存档")
-        st.caption("留档的意义在于，学生若来质询分配结果，office 可以用同一份参数重跑得到同一份结果。")
+    st.divider()
+    st.subheader("Provenance")
+    st.caption("Kept so that a query about any student can be answered by rerunning the same "
+               "round against the same register version and obtaining the same result.")
+    if res is not None and st.session_state.round_scope:
         provenance = {
+            "session": store.session,
+            "register_version": st.session_state.round_scope["params"]["register_version"],
+            "level": st.session_state.round_scope["level"],
+            "programmes": st.session_state.round_scope["programmes"],
             "engine": res.engine,
-            "lagrange_lambda": res.lagrange_lambda,
+            "lagrange_multiplier": res.lagrange_lambda,
             "assigned": res.n_assigned,
             "unassigned": res.n_unassigned,
             "below_good": res.n_below_good,
             "realised_mismatch_rate": round(res.tolerance_used, 4),
             "total_score": round(res.total_score, 4),
             "solve_seconds": round(res.solve_seconds, 3),
+            "parameters": st.session_state.round_scope["params"],
         }
         st.json(provenance)
-        st.download_button("参数存档 JSON",
+        st.download_button("Provenance (JSON)",
                            json.dumps(provenance, ensure_ascii=False, indent=2).encode("utf-8"),
                            "run_provenance.json", "application/json")

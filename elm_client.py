@@ -40,7 +40,7 @@ from typing import Dict, List, Optional, Sequence
 
 import requests
 
-DEFAULT_BASE_URL = os.environ.get("ELM_BASE_URL", "")   # 从 ELM 内部取得后填入
+DEFAULT_BASE_URL = os.environ.get("ELM_BASE_URL", "")   # obtained from within ELM
 DEFAULT_MODEL = os.environ.get("ELM_MODEL", "gpt-4o-mini")
 CACHE_PATH = Path(os.environ.get("ELM_CACHE", ".elm_cache.json"))
 
@@ -50,24 +50,56 @@ CACHE_PATH = Path(os.environ.get("ELM_CACHE", ".elm_cache.json"))
 # ---------------------------------------------------------------------------
 
 class Pseudonymiser:
-    """Swap real identifiers for session tokens before anything is sent out."""
+    """Replace real identifiers with sequence numbers before anything is sent.
 
-    def __init__(self, salt: Optional[str] = None):
-        self.salt = salt or os.urandom(8).hex()
-        self._forward: Dict[str, str] = {}
+    Sequence numbers rather than hashes, and issued separately for each side,
+    because the office has to read the review output and act on it: STU-0042
+    can be looked up in one step, whereas a hash is unreadable and invites
+    somebody to paste a real identifier into a prompt just to make sense of a
+    row. Nothing here is a security measure by itself; it is a way of making
+    sure that the only student identifier in a prompt is one that means nothing
+    outside this process, and that supervisors appear as codes rather than by
+    name.
+
+    The mapping is held in memory for the life of the session and is never
+    written to disk.
+    """
+
+    def __init__(self):
+        self._student_tokens: Dict[str, str] = {}
+        self._supervisor_tokens: Dict[str, str] = {}
         self._reverse: Dict[str, str] = {}
 
-    def token(self, real_id: str) -> str:
+    def student(self, real_id: str) -> str:
         real_id = str(real_id)
-        if real_id not in self._forward:
-            digest = hashlib.sha256((self.salt + real_id).encode()).hexdigest()[:10]
-            tok = f"ANON-{digest}"
-            self._forward[real_id] = tok
-            self._reverse[tok] = real_id
-        return self._forward[real_id]
+        if real_id not in self._student_tokens:
+            token = f"STU-{len(self._student_tokens) + 1:04d}"
+            self._student_tokens[real_id] = token
+            self._reverse[token] = real_id
+        return self._student_tokens[real_id]
+
+    def supervisor(self, real_id: str) -> str:
+        real_id = str(real_id)
+        if real_id not in self._supervisor_tokens:
+            token = f"SV-{len(self._supervisor_tokens) + 1:03d}"
+            self._supervisor_tokens[real_id] = token
+            self._reverse[token] = real_id
+        return self._supervisor_tokens[real_id]
+
+    # kept for callers that do not care which side they are tokenising
+    def token(self, real_id: str) -> str:
+        return self.student(real_id)
 
     def real(self, token: str) -> Optional[str]:
         return self._reverse.get(token)
+
+    def mapping_table(self) -> List[dict]:
+        """The mapping, for the office's own records. Never sent anywhere."""
+        rows = [{"side": "student", "token": t, "real_id": r}
+                for r, t in self._student_tokens.items()]
+        rows += [{"side": "supervisor", "token": t, "real_id": r}
+                 for r, t in self._supervisor_tokens.items()]
+        return rows
 
 
 def strip_identifiers(text: str) -> str:
@@ -78,6 +110,35 @@ def strip_identifiers(text: str) -> str:
     text = re.sub(r"\b[\w.+-]+@[\w-]+\.[\w.]+\b", "[EMAIL]", text)  # email
     text = re.sub(r"\b\d{7,12}\b", "[NUM]", text)
     return text
+
+
+def student_payload(row: dict, pseudo: Pseudonymiser, level: str = "UG",
+                    abstract_chars: int = 2000) -> dict:
+    """Exactly what is sent about one student: a code, a title and an abstract."""
+    return {
+        "student_code": pseudo.student(row.get("student_id", "")),
+        "level": str(row.get("level", level) or level),
+        "title": strip_identifiers(str(row.get("project_title", ""))),
+        "abstract": strip_identifiers(str(row.get("abstract", "")))[:abstract_chars],
+    }
+
+
+def supervisor_payload(row: dict, pseudo: Pseudonymiser,
+                       include_keywords: bool = False) -> dict:
+    """Exactly what is sent about one supervisor: a code, areas and methods.
+
+    The name never goes. Keywords are optional and off by default, since a
+    profile written as a list of publication titles identifies the person as
+    surely as their name does.
+    """
+    payload = {
+        "supervisor_code": pseudo.supervisor(row.get("supervisor_id", "")),
+        "research_areas": str(row.get("research_areas", "")),
+        "methods": str(row.get("methods", "")),
+    }
+    if include_keywords:
+        payload["keywords"] = strip_identifiers(str(row.get("keywords", "")))[:300]
+    return payload
 
 
 # ---------------------------------------------------------------------------
@@ -120,7 +181,7 @@ class ELMClient:
 
     def chat(self, messages: List[dict], json_mode: bool = True, retries: int = 3) -> str:
         if not self.config.base_url or not self.config.api_key:
-            raise RuntimeError("ELM base_url 或 api_key 未配置")
+            raise RuntimeError("The ELM base URL or API key has not been configured")
         key = self._key(messages)
         if self.config.use_cache and key in self._cache:
             return self._cache[key]
@@ -155,7 +216,7 @@ class ELMClient:
             except Exception as exc:
                 last_error = exc
                 time.sleep(1.5 * (attempt + 1))
-        raise RuntimeError(f"ELM 请求失败: {last_error}")
+        raise RuntimeError(f"The ELM request failed: {last_error}")
 
     def chat_json(self, messages: List[dict], fallback: dict) -> dict:
         try:
@@ -172,7 +233,7 @@ class ELMClient:
                     return json.loads(match.group(0))
                 except json.JSONDecodeError:
                     pass
-            return {**fallback, "error": "模型输出不是合法 JSON"}
+            return {**fallback, "error": "The model did not return valid JSON"}
 
     def map_parallel(self, fn, items: Sequence, progress=None) -> List:
         results: List = [None] * len(items)
@@ -196,13 +257,29 @@ class ELMClient:
 # ---------------------------------------------------------------------------
 
 EXTRACT_SYSTEM = """You support a university teaching operations office that allocates \
-undergraduate business dissertations to supervisors. You are given one anonymised \
-student submission. Map it onto the controlled vocabulary supplied. Never invent tags \
-outside the vocabulary. Judge only what the text supports.
+business school dissertations to supervisors, at undergraduate level (UG) and at taught \
+postgraduate level (PGT). You are given one anonymised student submission, labelled with \
+its level. Map it onto the controlled vocabulary supplied. Never invent tags outside the \
+vocabulary. Judge only what the text supports.
+
+Apply the standard of the level given. A PGT submission is expected to name a method with \
+enough precision that a supervisor could judge feasibility, and a topic that goes beyond a \
+description of current practice; the same submission text would often be acceptable at UG \
+and thin at PGT, so rate clarity against the level rather than in the abstract.
+
+Methods are hierarchical. Where the text supports a specific technique, name it from the \
+vocabulary. Where it does not, fall back to the paradigm, which is one of "quantitative", \
+"qualitative" or "both", and do not guess a technique the student has not implied: an \
+undergraduate who has established only that the work will be quantitative is better \
+recorded as quantitative than as a regression study they never mentioned, because the \
+matching treats a paradigm as a genuine if coarse statement and treats an invented \
+technique as a false one.
 
 Return a JSON object with exactly these keys:
   "areas": array of vocabulary strings, at most 3, ordered by centrality
-  "methods": array of vocabulary strings, at most 3
+  "methods": array of at most 3, each either a vocabulary technique or a paradigm
+  "method_confidence": "specific" if the text names techniques, "paradigm" if only the \
+broad approach is clear, "unclear" if neither
   "clarity": integer 1-5, where 5 means the topic is specific enough to supervise and \
 1 means it is too vague to allocate
   "feasibility_flags": array of short strings for concerns such as \
@@ -213,22 +290,26 @@ Return a JSON object with exactly these keys:
 
 def extract_profile(client: ELMClient, submission: dict,
                     area_vocab: Sequence[str], method_vocab: Sequence[str]) -> dict:
+    """Map one submission onto the controlled vocabulary.
+
+    ``submission`` should already be a payload from ``student_payload``: a code,
+    a level, a title and an abstract, and nothing else.
+    """
     user = json.dumps({
-        "anon_id": submission.get("anon_id"),
-        "project_title": strip_identifiers(str(submission.get("project_title", ""))),
-        "project_name": strip_identifiers(str(submission.get("project_name", ""))),
-        "abstract": strip_identifiers(str(submission.get("abstract", "")))[:3000],
-        "references": strip_identifiers(str(submission.get("references", "")))[:1500],
+        "student_code": submission.get("student_code", submission.get("anon_id")),
+        "level": submission.get("level", "UG"),
+        "title": submission.get("title", ""),
+        "abstract": submission.get("abstract", ""),
         "area_vocabulary": list(area_vocab),
         "method_vocabulary": list(method_vocab),
     }, ensure_ascii=False)
     out = client.chat_json(
         [{"role": "system", "content": EXTRACT_SYSTEM},
          {"role": "user", "content": user}],
-        fallback={"areas": [], "methods": [], "clarity": 3,
+        fallback={"areas": [], "methods": [], "clarity": 3, "method_confidence": "unclear",
                   "feasibility_flags": [], "one_line_summary": ""},
     )
-    out["anon_id"] = submission.get("anon_id")
+    out["student_code"] = submission.get("student_code", submission.get("anon_id"))
     return out
 
 
@@ -237,33 +318,20 @@ def extract_profile(client: ELMClient, submission: dict,
 # ---------------------------------------------------------------------------
 
 SCREEN_SYSTEM = """You assess whether a supervisor could reasonably supervise a given \
-undergraduate dissertation topic. You are shown one anonymised topic and a shortlist of \
-supervisor profiles. For each supervisor return a fit score from 0 to 100 and a reason of \
-at most 20 words. Score on substantive capability only: does the supervisor's research area \
+dissertation topic at the level stated, UG for undergraduate or PGT for taught postgraduate. You are shown one anonymised topic and a shortlist of \
+supervisor profiles. Supervisors appear as codes rather than names. For each, return a fit score from 0 to 100 \
+and a reason of at most 20 words. Score on substantive capability only: does the supervisor's research area \
 cover the topic, and can they supervise the stated method. Ignore workload and availability, \
 which are handled elsewhere. Do not be generous: 50 means plausible but unremarkable.
 
-Return JSON: {"ratings": [{"supervisor_id": str, "score": int, "reason": str}]}
+Return JSON: {"ratings": [{"supervisor_code": str, "score": int, "reason": str}]}
 """
 
 
 def screen_shortlist(client: ELMClient, student: dict, shortlist: List[dict]) -> dict:
-    user = json.dumps({
-        "topic": {
-            "anon_id": student.get("anon_id"),
-            "title": strip_identifiers(str(student.get("project_title", ""))),
-            "abstract": strip_identifiers(str(student.get("abstract", "")))[:2000],
-            "declared_areas": student.get("areas", ""),
-            "declared_methods": student.get("methods", ""),
-        },
-        "supervisors": [
-            {"supervisor_id": s["supervisor_id"],
-             "research_areas": s.get("research_areas", ""),
-             "methods": s.get("methods", ""),
-             "keywords": str(s.get("keywords", ""))[:400]}
-            for s in shortlist
-        ],
-    }, ensure_ascii=False)
+    """Rate a shortlist. ``student`` and ``shortlist`` are already payloads."""
+    user = json.dumps({"topic": student, "supervisors": list(shortlist)},
+                      ensure_ascii=False)
     return client.chat_json(
         [{"role": "system", "content": SCREEN_SYSTEM},
          {"role": "user", "content": user}],
@@ -275,10 +343,17 @@ def screen_shortlist(client: ELMClient, student: dict, shortlist: List[dict]) ->
 # Job 3: audit the finished allocation
 # ---------------------------------------------------------------------------
 
-AUDIT_SYSTEM = """You are the final check on a completed allocation of undergraduate \
-dissertations to supervisors, produced by an optimisation model. Your job is to protect \
-the students and the office from a bad pairing that the scoring rules did not catch. \
-You are shown a batch of finished pairings.
+AUDIT_SYSTEM = """You are the final check on a completed allocation of dissertations to \
+supervisors, produced by an optimisation model. Your job is to protect the students and \
+the office from a bad pairing that the scoring rules did not catch. You are shown a batch \
+of finished pairings, each labelled UG for undergraduate or PGT for taught postgraduate.
+
+Hold the two levels to different standards. At PGT the supervisor should be able to \
+supervise the stated method at depth, since the student will be examined on execution as \
+well as on framing, so a supervisor whose research touches the area but not the method is \
+a legitimate query. At UG a supervisor with a sound grasp of the area and general \
+competence in the method is sufficient, and demanding a specialist there would generate \
+noise the office cannot act on.
 
 For each pairing return one of three verdicts:
   "ok"      - the supervisor can clearly supervise this topic
@@ -290,7 +365,11 @@ Be conservative with "reject": the model does not know the supervisor's full his
 a wrong rejection costs the office real work. State the reason in at most 25 words, and \
 name the specific area or method that drives the verdict.
 
-Return JSON: {"reviews": [{"anon_id": str, "verdict": "ok"|"query"|"reject", \
+Neither students nor supervisors are named; both appear as codes, and a verdict must rest \
+on the subject matter in front of you rather than on any assumption about who these people \
+are.
+
+Return JSON: {"reviews": [{"student_code": str, "verdict": "ok"|"query"|"reject", \
 "reason": str, "confidence": "low"|"medium"|"high"}]}
 """
 
