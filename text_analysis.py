@@ -37,6 +37,8 @@ from typing import Dict, List, Optional, Sequence, Tuple
 import numpy as np
 import pandas as pd
 
+__version__ = "2.0.0"
+
 CJK_RE = re.compile(r"[\u4e00-\u9fff]")
 
 # Words that carry no signal in a dissertation proposal, over and above the

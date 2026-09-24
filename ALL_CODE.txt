@@ -1,0 +1,3636 @@
+================================================================================
+DISSERTATION ALLOCATION — COMPLETE SOURCE
+================================================================================
+Version 2.0.0, assembled 24 September 2026
+
+Every file of the working system is below, one after another, each introduced by
+a banner line of the form
+
+    ##### FILE: <name> #####
+
+To rebuild the folder by hand, create a file of each name and paste the block
+that follows its banner, up to the next banner. The three CSV files at the end
+are sample data; replace them with your own once the pipeline runs.
+
+Install with:   pip install -r requirements.txt
+Then run:       setup_session.py, then run_allocation.py
+
+The sample CSVs are included in full for the supervisor and conflicts files. The
+student sample is 570 rows, so only its header and first rows appear here; take
+the complete file from the folder or the archive.
+================================================================================
+
+
+##### FILE: README.md #####
+
+# Dissertation allocation
+
+Allocates business school dissertations to supervisors, undergraduate and taught
+postgraduate, for a teaching operations office. It runs on one computer, keeps its records in
+one file, and produces a report that somebody who has never seen the code can read.
+
+There is no web server, no account to sign in to and no AI service involved. Nothing is sent
+anywhere: the matching is arithmetic on the text and tags you supply, so the same inputs always
+give the same answer and every pairing can be explained by pointing at what the two have in
+common. Everything stays on the machine it runs on, including after it has run.
+
+## What you get out of a run
+
+Every round writes a dated folder containing:
+
+| File | What it is for |
+|---|---|
+| `report.html` | **Open this one.** A single page: what needs doing, who has nobody, which pairings are worth a second look, and a searchable list of everyone. Double-click it; it needs nothing installed and works offline. |
+| `allocation.xlsx` | The same information as a spreadsheet, one sheet per question: Summary, Allocation, Without a supervisor, By supervisor, Second look, Ethics and data, If a student asks. |
+| `allocation.csv`, `supervisor_loads.csv` and the rest | The plain rows, for anyone who wants to work with them directly. |
+| `draft.json` | How the round is committed later. Not for reading. |
+
+The report opens with what has to be done rather than with statistics, because that is the
+first question anybody has. Colour means one thing only: amber for a pairing somebody should
+look at, red for a student nobody was found for. Nothing is coloured for decoration.
+
+The workbook's summary counts the Allocation sheet with formulas rather than with numbers
+typed in by the script, so if somebody moves a student to a different supervisor by hand,
+which they will, the totals follow them instead of quietly becoming wrong.
+
+## The four scripts
+
+Open these in PyCharm and press Run. Each has a short `SETTINGS` block at the top, and that
+is the only part anybody needs to change.
+
+**`setup_session.py`** — run once at the start of the year, and again whenever the register
+spreadsheet changes. It creates the session file and loads the supervisors into it. It never
+replaces the register wholesale: a supervisor already carrying students cannot be removed by
+a stale spreadsheet, and anybody missing from the upload is reported and left alone. Tag
+lists longer than agreed are trimmed and the discarded entries are printed, so they can be
+discussed rather than lost.
+
+**`run_allocation.py`** — the main one. Set the level, the programmes and how strict to be,
+press Run, and read the console summary and then the report. Nothing is committed by running
+it: the round becomes real only when you set `commit` to `True` or run `commit_round.py`.
+That separation is the difference between a proposal and a decision, and it lets a round be
+produced on Thursday and approved on Friday without anything being recalculated in between.
+
+**`commit_round.py`** — writes a round into the session and reduces everybody's remaining
+capacity.
+
+```bash
+python commit_round.py runs/2026-09-24_1530_PGT
+```
+
+If the register has changed since the draft was produced, it refuses and says so, because the
+capacity the draft was computed against no longer exists and committing anyway would
+overbook people.
+
+**`manage.py`** — the occasional jobs, as a numbered menu in the console: where the session
+stands, undo a round, a supervisor has withdrawn, free particular students, export
+everything, check a student file before allocating. Nothing to memorise and no arguments to
+get right.
+
+## How a session fits together
+
+```
+setup_session.py            once, then whenever the register changes
+       |
+run_allocation.py           per cohort: PGT in January, UG in March, stragglers in June
+       |                    commit = False while you are still looking
+   read report.html
+       |
+commit_round.py             capacity comes off everybody's allowance
+       |
+   next cohort              which now sees what is genuinely left
+```
+
+Everything that survives between runs lives in one JSON file for one academic session, for
+example `session_2026-27.json`: the supervisor register, every committed round with the
+settings that produced it, and an audit trail of changes. Copy it, archive it, email it.
+
+This matters most where the same person supervises at both levels. A supervisor commonly
+takes undergraduate and masters students in the same year, weeks apart. If each round started
+from a freshly uploaded spreadsheet the second would know nothing of the first, and the most
+popular supervisors would quietly be booked twice. Here, committing a round writes straight
+back to the register, so the March round already reflects the January one without anybody
+editing a cell.
+
+Two people can work at once: every write checks that the file on disk has not moved since it
+was read, and reports a clash rather than overwriting somebody else's change. Keep the session
+file on a managed drive and both of you will be working on the same record.
+
+## Supervision units and levels
+
+An allowance is recorded in supervision units rather than in a headcount, because a masters
+dissertation is not the same amount of work as an undergraduate one. Each level carries a
+weight, one for UG and one and a half for PGT by default. An allowance of twelve units buys
+twelve undergraduates, or eight masters students, or any combination between. A supervisor
+can also cap one level, which is how somebody willing to take masters students but wanting no
+more than three undergraduates records that.
+
+Rounds are single-level by design. Within one level every student costs the same number of
+units, so the allowance converts cleanly into a number of places, which is what keeps the
+underlying calculation fast and exact.
+
+## Data formats
+
+**Register**, `sample_supervisors.csv`
+
+| Column | Required | Notes |
+|---|---|---|
+| supervisor_id | yes | Unique identifier |
+| name, group | yes | |
+| research_areas | yes | Semicolon-separated, at most four, most important first |
+| methods | yes | Semicolon-separated, at most six, most important first |
+| keywords | no | Free text: publications, past topics, anything that helps the match |
+| allowance_units | yes | Supervision units agreed for the session |
+| cap_UG, cap_PGT | no | Ceiling on one level |
+| min_load | no | Lower bound |
+| available | no | 0 for leave or absence |
+| programmes | no | Restricts to named programmes; blank means all |
+
+**Students**, `sample_students.csv`
+
+| Column | Required | Notes |
+|---|---|---|
+| student_id | yes | The only identifier that ever leaves the process |
+| level | recommended | UG or PGT |
+| programme | recommended | Used to scope a round |
+| project_title, abstract | yes | |
+| areas, methods | no | A method may be a technique or simply `quantitative`, `qualitative` or `both` |
+| preferred_supervisor_id | no | A bonus, never a constraint |
+| locked_supervisor_id | no | Forces a pairing the office has already decided |
+
+**Conflicts**, `sample_conflicts.csv`: `student_id`, `supervisor_id`, `reason`. A declared
+family relationship, a previous appeal, a seat on a discipline panel. These are questions of
+eligibility rather than of fit, so they are excluded outright rather than folded into the
+score where a generous tolerance could override them.
+
+## Tag limits, and why order matters
+
+At most four research areas and six methods per supervisor, and the data collection form
+should say the same. A profile of twelve areas matches everything and therefore distinguishes
+nothing, and the person who writes it ends up supervising work they have no interest in.
+
+Order is kept and treated as meaningful, so a supervisor who lists inventory control first and
+stochastic programming fourth scores higher on the first. Longer lists are trimmed from the
+end at upload and everything dropped is reported.
+
+## Method vocabulary at two levels
+
+Undergraduates in particular can often say only that their project is qualitative or
+quantitative, while supervisors describe themselves in specific techniques. Treated as flat
+text those vocabularies never meet, every such student scores zero against everybody, and the
+result looks like a shortage of supervisors that does not exist.
+
+Methods are therefore held as a two-level taxonomy, paradigm above technique. A student who
+names a technique the supervisor also names scores 1; one who names only the paradigm scores
+0.8, rising to 0.9 where the supervisor offers two or more techniques within it; one who names
+a different technique from the same paradigm scores 0.45. Precision is rewarded without
+vagueness being fatal. On the sample cohort, where 134 of 570 submissions give nothing more
+specific than a paradigm:
+
+| | Median best match for those students | Left unplaced | Of which paradigm-only |
+|---|---|---|---|
+| Flat method text | 0.324 | 126 | 77 |
+| Two-level taxonomy | 0.535 | 41 | 0 |
+
+## Using the title and the proposal
+
+Three things are read from the title and abstract, with no model involved and no network
+access, in `text_analysis.py`.
+
+**Key phrases**: the terms that distinguish one proposal from the rest of the cohort. They
+carry weight in the score and, more usefully, they appear against every pairing as the
+evidence for it, so the report says *areas: finance; methods: optimisation; proposal terms:
+optimisation finance* rather than *0.61*. That column is what makes a decision explainable to
+the student it concerns.
+
+**Latent semantic similarity**: surface overlap misses a proposal that says "stock levels"
+where a profile says "inventory". Reducing the term-document matrix recovers much of that.
+
+**Requirements**: whether the proposal implies primary data collection, human participants,
+company access, paid data or heavy computation. The first two point to ethics approval and the
+others to something to confirm, and February is a far better time to discover either than
+June. The reference list is deliberately excluded, since it contributes author surnames rather
+than subject matter.
+
+## How the allocation is decided
+
+Every student is scored against every available supervisor on research area, method, the
+wording of the proposal and its distinguishing phrases. The allocation then maximises the
+total strength of match subject to the capacity each supervisor agreed to, so it is not
+first-come-first-served and does not depend on the order students applied in. The same inputs
+and settings always give the same answer.
+
+Three settings control strictness. The **minimum standard of fit** keeps a pairing out of
+consideration entirely; below it, a student is better handed to a person than forced onto
+somebody unsuitable. The **standard for a good match** defines what needs no further thought.
+The **tolerance** is the share of pairings allowed to fall below that standard: at zero the
+calculation will leave students unplaced rather than force a weak pairing, and loosening it
+trades average quality for fewer gaps.
+
+Underneath, with the tolerance set aside, the problem is a transportation problem, whose
+structure guarantees that the fast method already returns a whole-number answer with no
+searching. The tolerance is the only thing that complicates that, and it is handled two ways:
+quickly, by penalising weak pairings and tuning the penalty until the tolerance is met, and
+exactly, by stating it as a constraint and solving the integer program. Set `cross_check` to
+`True` and both run, and the run tells you whether they agree. Measured on this code:
+
+| Students | Supervisors | Fast method | Exact method | Agree |
+|---|---|---|---|---|
+| 300 | 90 | 0.61 s | 0.92 s | yes |
+| 570 | 121 | 0.10 s | 2.73 s | yes |
+| 900 | 150 | 0.16 s | 5.61 s | yes |
+| 2,000 | 200 | 0.45 s | 23.19 s | yes |
+
+`python benchmark.py` reproduces it. A commercial solver is unnecessary at this size.
+
+## Situations this is built to handle
+
+| Situation | What to do |
+|---|---|
+| One programme needs an answer before the others | Scope the round to it; capacity is reserved for the rest automatically |
+| The same supervisor takes UG and PGT students | One allowance in units, reduced by whichever round commits first |
+| Willing to take masters students but only three undergraduates | A cap on one level in the register |
+| Late, deferred and resitting students | Run another round; students already placed are excluded automatically |
+| A supervisor goes on leave or resigns | `manage.py`, option 3: frees their students only, everything else stands |
+| A student changes topic or withdraws | `manage.py`, option 4 |
+| A declared conflict of interest | The conflicts file |
+| One group is being swamped by a fashionable topic | Group ceilings |
+| A round was run on the wrong settings | `manage.py`, option 2, before or after committing |
+| Two people working at once | Writes are version-checked and a clash is reported |
+| A student asks what the pairing was based on | The evidence column, in the report and the workbook |
+| A student asks why they did not get somebody better | The *If a student asks* sheet |
+| Reproducing a result months later | The settings are recorded with the round, including the register version |
+
+## Not included
+
+- Second supervisors and second markers. Structurally the same calculation run again with the
+  first supervisor excluded, and not difficult to add.
+- A year-on-year fairness ledger, so that somebody who took more than their share last year
+  automatically takes fewer. For now that judgement belongs to the office and goes into the
+  allowance.
+- Supervisors ranking students as well as the other way round.
+- Any link to EUCLID or Learn. Files in, files out.
+
+## Installing
+
+```bash
+pip install -r requirements.txt
+```
+
+In PyCharm, open the folder, let it create an interpreter, then run `pip install -r
+requirements.txt` in the terminal it provides. After that, every script runs from the green
+arrow.
+
+## Files
+
+- `setup_session.py`, `run_allocation.py`, `commit_round.py`, `manage.py` — the four things
+  anybody needs to open
+- `matching_core.py` — scoring, the method taxonomy, the allocation itself and the diagnostics
+- `store.py` — the session file: register, rounds, capacity and audit trail
+- `text_analysis.py` — key phrases, semantic similarity, ethics and data flags
+- `report.py` — the HTML report and the workbook
+- `benchmark.py` — reproduces the timing table
+- `sample_supervisors.csv`, `sample_students.csv`, `sample_conflicts.csv` — 121 supervisors and
+  570 students across three undergraduate and four masters programmes
+
+
+##### FILE: requirements.txt #####
+
+pandas>=2.0
+numpy>=1.24
+scipy>=1.11
+scikit-learn>=1.3
+pulp>=2.7
+openpyxl>=3.1
+
+
+##### FILE: setup_session.py #####
+
+"""
+setup_session.py
+================
+Start an academic session and load the supervisor register into it.
+
+Run this once at the beginning of the session, and again whenever the register
+spreadsheet changes. It never replaces the register wholesale: supervisors
+already carrying students cannot be removed by a stale spreadsheet, and anybody
+missing from the upload is reported and left alone.
+
+Open it in PyCharm, adjust the few lines below, and press Run.
+"""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+import pandas as pd
+
+import matching_core as mc
+import store as stx
+
+SETTINGS = {
+    "session_file": "session_2026-27.json",
+    "session_name": "2026/27",
+
+    # The register spreadsheet. Required columns: supervisor_id, name, group,
+    # research_areas, methods, allowance_units. Optional: keywords, min_load,
+    # available, programmes, cap_UG, cap_PGT.
+    "register_file": "sample_supervisors.csv",
+
+    # Supervision units per dissertation, by level. A masters dissertation is
+    # more work than an undergraduate one, so an allowance of twelve units buys
+    # twelve undergraduates, or eight masters students, or a mixture.
+    "level_weights": {"UG": 1.0, "PGT": 1.5},
+
+    # Leave allowances alone and refresh only names, areas and methods. Set this
+    # to True once the office has started editing allowances in the session and
+    # the spreadsheet has fallen behind.
+    "keep_existing_allowances": False,
+}
+
+
+def main() -> None:
+    s = SETTINGS
+    path = Path(s["register_file"])
+    if not path.exists():
+        sys.exit(f"Cannot find {path}. Check register_file at the top of this file.")
+
+    store = stx.SessionStore(s["session_file"], session=s["session_name"])
+    if store.level_weights != s["level_weights"]:
+        store.set_level_weights(s["level_weights"])
+
+    df = pd.read_excel(path, dtype=str).fillna("") if path.suffix.lower() in (".xlsx", ".xls") \
+        else pd.read_csv(path, encoding="utf-8-sig", dtype=str).fillna("")
+
+    report = store.sync_from_dataframe(
+        df, update_allowances=not s["keep_existing_allowances"])
+
+    print(f"Session {store.session}, file {store.path}, register version {store.version}")
+    print(f"  added    {len(report['added'])}")
+    print(f"  updated  {len(report['updated'])}")
+    print(f"  the same {len(report['unchanged'])}")
+    if report["absent_from_upload"]:
+        print(f"  in the register but not in the spreadsheet, left untouched: "
+              f"{len(report['absent_from_upload'])}")
+        print("    " + ", ".join(report["absent_from_upload"][:15]))
+
+    if report["tags_trimmed"]:
+        print(f"\n{len(report['tags_trimmed'])} tag lists were longer than agreed and have "
+              f"been trimmed to {mc.MAX_AREA_TAGS} areas and {mc.MAX_METHOD_TAGS} methods, "
+              "keeping the order given. Worth going back to these people rather than losing "
+              "the rest quietly:")
+        print(pd.DataFrame(report["tags_trimmed"]).to_string(index=False))
+
+    register = store.register_dataframe()
+    table = store.capacity_table(register)
+    print(f"\n{len(register)} supervisors, {table['allowance_units'].sum():.0f} supervision "
+          f"units in total, {table['units_used'].sum():.0f} already used, "
+          f"{table['units_left'].sum():.0f} left")
+    for level, weight in sorted(store.level_weights.items()):
+        places = store.capacity_for_round(register, level)
+        print(f"  room for {int(places.sum())} more students at {level} "
+              f"(one of them costs {weight} units)")
+
+    unavailable = int((register["available"].astype(int) == 0).sum())
+    if unavailable:
+        print(f"  {unavailable} supervisors are marked unavailable this session")
+
+
+if __name__ == "__main__":
+    main()
+
+
+##### FILE: run_allocation.py #####
+
+"""
+run_allocation.py
+=================
+Run one allocation round by editing the settings below and pressing Run.
+
+This is the file to open in PyCharm. Nothing here needs the command line, and
+nothing needs to be typed twice: change the few lines in SETTINGS, press the
+green arrow, and the script prints a plain summary in the console and writes an
+output folder containing a report you can open by double-clicking it, a
+spreadsheet, and the underlying CSVs.
+
+Nothing is committed to the session by simply running this. The round becomes
+real only when COMMIT is set to True, or by running commit_round.py against the
+folder that was produced. That is the difference between a proposal and a
+decision, and it lets an allocation be produced on Thursday and approved on
+Friday without anything being recalculated in between.
+
+The order of work across a session:
+
+    1. set up_the session once          python setup_session.py
+    2. produce a round                  this file, with COMMIT = False
+    3. read the report, fix what needs fixing, run it again
+    4. commit it                        this file with COMMIT = True,
+                                        or python commit_round.py
+    5. repeat for the next cohort; capacity carries across automatically
+"""
+
+from __future__ import annotations
+
+import sys
+import time
+import webbrowser
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+
+import matching_core as mc
+import report as rp
+import store as stx
+import text_analysis as ta
+
+# ===========================================================================
+# SETTINGS — this is the only part you need to change
+# ===========================================================================
+
+SETTINGS = {
+    # Where the session lives. One file per academic session; it holds the
+    # supervisor register, every committed round and the audit trail.
+    "session_file": "session_2026-27.json",
+
+    # The student file for this round.
+    "students_file": "sample_students.csv",
+
+    # Declared conflicts of interest, or None.
+    "conflicts_file": "sample_conflicts.csv",
+
+    # Which cohort this round covers. Leave "programmes" empty for every
+    # programme at this level.
+    "level": "PGT",
+    "programmes": ["MSc Business Analytics", "MSc Finance"],
+
+    # How strict to be.
+    #   minimum_fit       below this a pairing is never considered at all
+    #   good_match        at or above this a pairing needs no further thought
+    #   tolerance         share of pairings allowed below that standard
+    "minimum_fit": 0.15,
+    "good_match": 0.50,
+    "tolerance": 0.10,
+
+    # Capacity held back for cohorts not yet allocated.
+    #   "proportional"  shares it out in proportion to the students still to place
+    #   "use_all"       lets this round take everything, right for the last round
+    "reserve": "proportional",
+    "reserve_floor": 0,
+
+    # Where the output folder goes.
+    "output_folder": "runs",
+
+    # True writes the round into the session and reduces everybody's remaining
+    # capacity. Leave it False while you are still looking at the result.
+    "commit": False,
+
+    # Open the report in a browser as soon as it is written.
+    "open_report": True,
+
+    # Also solve the problem a second way and confirm both agree. Slower, and
+    # worth doing once before a round goes out.
+    "cross_check": False,
+
+}
+
+# ===========================================================================
+# Everything below runs the round; you should not need to edit it
+# ===========================================================================
+
+
+def line(char: str = "-", width: int = 72) -> None:
+    print(char * width)
+
+
+def heading(text: str) -> None:
+    print()
+    print(text)
+    line()
+
+
+def fail(message: str) -> None:
+    print()
+    print("Stopped: " + message)
+    sys.exit(1)
+
+
+def read_table(path: str) -> pd.DataFrame:
+    p = Path(path)
+    if not p.exists():
+        fail(f"cannot find {path}. Check the file name in SETTINGS at the top of this file.")
+    if p.suffix.lower() in (".xlsx", ".xls"):
+        return pd.read_excel(p, dtype=str).fillna("")
+    return pd.read_csv(p, encoding="utf-8-sig", dtype=str).fillna("")
+
+
+def main() -> None:
+    s = SETTINGS
+    store = stx.SessionStore(s["session_file"])
+    register = store.register_dataframe()
+    if not len(register):
+        fail(f"the register in {s['session_file']} is empty. Run setup_session.py first.")
+
+    students_all = read_table(s["students_file"])
+    committed = store.committed_students()
+
+    heading(f"Session {store.session}, register version {store.version}")
+    print(f"{len(register)} supervisors on the register")
+    print(f"{len(students_all)} students in {s['students_file']}, "
+          f"{len(committed & set(students_all['student_id']))} of them already placed "
+          "in an earlier round")
+
+    mask = np.ones(len(students_all), dtype=bool)
+    if "level" in students_all.columns:
+        mask &= (students_all["level"].astype(str) == s["level"]).to_numpy()
+    if s["programmes"]:
+        mask &= students_all["programme"].astype(str).isin(s["programmes"]).to_numpy()
+    if committed:
+        mask &= ~students_all["student_id"].astype(str).isin(committed).to_numpy()
+
+    idx = np.where(mask)[0]
+    if not len(idx):
+        fail("no students match this round. Check the level and programmes in SETTINGS.")
+    students = students_all.iloc[idx].reset_index(drop=True)
+
+    outstanding = (~students_all["student_id"].astype(str).isin(committed)).to_numpy() \
+        if committed else np.ones(len(students_all), dtype=bool)
+    upcoming = int((outstanding & ~mask).sum())
+
+    heading("This round")
+    print(f"level {s['level']}, "
+          f"{', '.join(s['programmes']) if s['programmes'] else 'every programme'}")
+    print(f"{len(students)} students to place now, {upcoming} still to come afterwards")
+
+    # --- scoring ---------------------------------------------------------
+    print("\nWorking out how well every student fits every supervisor ...")
+    started = time.time()
+    score_all, components_all = mc.build_score_matrix(students_all, register)
+    score = score_all[idx, :]
+    components = {
+        k: (v[idx] if isinstance(v, np.ndarray) else [v[i] for i in idx])
+        for k, v in components_all.items()
+        if k in ("area", "method", "text", "phrase", "student_phrases",
+                 "phrase_evidence", "student_areas", "student_methods")
+    }
+    components["supervisor_areas"] = components_all["supervisor_areas"]
+    components["supervisor_methods"] = components_all["supervisor_methods"]
+    print(f"done in {time.time() - started:.1f} seconds")
+
+    best = score.max(axis=1)
+    hopeless = int((best < s["minimum_fit"]).sum())
+    if hopeless:
+        print(f"{hopeless} students have nobody above the minimum standard of fit. They will "
+              "come out unplaced, and the usual cause is a proposal too vague to match.")
+
+    # --- capacity ---------------------------------------------------------
+    level_capacity = store.capacity_for_round(register, s["level"])
+    capacity = stx.reserve_capacity(level_capacity, len(students), upcoming,
+                                    mode=s["reserve"],
+                                    floor_per_supervisor=int(s["reserve_floor"]))
+    heading("Capacity")
+    print(f"{int(level_capacity.sum())} places available at {s['level']} across the register")
+    print(f"{int(capacity.sum())} of them opened to this round under the "
+          f"'{s['reserve']}' policy")
+    if capacity.sum() < len(students):
+        print("that is fewer places than students, so some will be left unplaced")
+
+    # --- constraints ------------------------------------------------------
+    sup_index = {str(v): j for j, v in enumerate(register["supervisor_id"])}
+    locked = {}
+    if "locked_supervisor_id" in students.columns:
+        for i, v in enumerate(students["locked_supervisor_id"]):
+            j = sup_index.get(str(v).strip())
+            if j is not None:
+                locked[i] = j
+    if locked:
+        print(f"{len(locked)} pairings are fixed by hand and will be kept")
+
+    conflicts = set()
+    if s["conflicts_file"]:
+        cdf = read_table(s["conflicts_file"])
+        stu_pos = {str(v): i for i, v in enumerate(students["student_id"])}
+        for _, row in cdf.iterrows():
+            i = stu_pos.get(str(row["student_id"]).strip())
+            j = sup_index.get(str(row["supervisor_id"]).strip())
+            if i is not None and j is not None:
+                conflicts.add((i, j))
+        print(f"{len(conflicts)} declared conflicts of interest apply to this round")
+
+    unavailable = [j for j, a in enumerate(register["available"]) if int(a) == 0]
+    if unavailable:
+        print(f"{len(unavailable)} supervisors are unavailable this session")
+
+    eligibility = None
+    if "programmes" in register.columns and "programme" in students.columns:
+        elig = np.ones((len(students), len(register)), dtype=bool)
+        restricted = 0
+        stu_progs = [str(v).strip().lower() for v in students["programme"]]
+        for j, allowed in enumerate([mc.split_tags(v) for v in register["programmes"]]):
+            if not allowed:
+                continue
+            restricted += 1
+            for i, pg in enumerate(stu_progs):
+                elig[i, j] = pg in allowed
+        if restricted:
+            eligibility = elig
+            print(f"{restricted} supervisors take only certain programmes")
+
+    # --- allocate ---------------------------------------------------------
+    print("\nAllocating ...")
+    candidates = mc.build_candidates(score, hard_floor=s["minimum_fit"], top_k=25,
+                                     locked=locked, unavailable=unavailable,
+                                     blocked_pairs=conflicts, eligibility=eligibility)
+    params = mc.AllocationParams(good_threshold=s["good_match"], tolerance=s["tolerance"])
+    register_run = register.copy()
+    register_run["workload"] = capacity
+    result = mc.allocate(students, register_run, score, candidates, params, capacity,
+                         components=components)
+
+    heading("Result")
+    print(f"placed                        {result.n_assigned}")
+    print(f"left without a supervisor     {result.n_unassigned}")
+    print(f"for a second look             {result.n_below_good} "
+          f"({result.tolerance_used:.0%} against a tolerance of {s['tolerance']:.0%})")
+    print(f"average strength of match     "
+          f"{result.total_score / max(result.n_assigned, 1):.3f}")
+    print(f"solved in                     {result.solve_seconds:.2f} seconds")
+
+    if s["cross_check"]:
+        print("\nSolving a second way to confirm ...")
+        exact = mc.allocate(students, register_run, score, candidates,
+                            mc.AllocationParams(**{**params.__dict__, "engine": "milp"}),
+                            capacity)
+        if abs(exact.total_score - result.total_score) < 1e-6:
+            print("both methods agree, the result is optimal")
+        else:
+            print(f"the two methods disagree: {exact.total_score:.4f} against "
+                  f"{result.total_score:.4f}. Do not send this out; tell whoever maintains "
+                  "this tool.")
+
+    # --- output -----------------------------------------------------------
+    diagnostics = mc.diagnose_allocation(result, score, candidates, students,
+                                         register_run, capacity)
+    requirements = ta.requirements_table(students)
+    scope = {"level": s["level"], "programmes": s["programmes"]}
+    run_params = {"hard_floor": s["minimum_fit"], "good_threshold": s["good_match"],
+                  "tolerance": s["tolerance"], "reservation": s["reserve"],
+                  "engine": result.engine, "register_version": store.version,
+                  "produced_by": "run_allocation.py"}
+
+    folder = Path(s["output_folder"]) / f"{time.strftime('%Y-%m-%d_%H%M')}_{s['level']}"
+    written = rp.build_pack(folder, result, students, register, diagnostics, requirements,
+                            store.capacity_table(register), scope, store.session,
+                            store.version, run_params)
+
+    heading("Written")
+    for label, path in [("report, open this one", written["report"]),
+                        ("spreadsheet", written["workbook"]),
+                        ("allocation as CSV", written["allocation_csv"])]:
+        print(f"{label:<26} {path}")
+
+    if s["commit"]:
+        rnd = store.commit_rows(
+            [r for r in __import__("json").loads(written["draft"].read_text())["rows"]],
+            f"{s['level']} · {', '.join(s['programmes']) or 'all'} · {result.n_assigned}",
+            s["level"], s["programmes"], run_params)
+        table = store.capacity_table(register)
+        heading("Committed")
+        print(f"round {rnd['round_id']} written into {s['session_file']}")
+        print(f"{table['units_used'].sum():.0f} supervision units now used, "
+              f"{table['units_left'].sum():.0f} left for the rest of the session")
+    else:
+        heading("Not committed")
+        print("Nothing has been written into the session file and no supervisor's remaining")
+        print("capacity has changed. When you are happy with the result, either set")
+        print("  commit = True   in SETTINGS and run this file again,")
+        print("or run:")
+        print(f"  python commit_round.py {folder}")
+
+    if s["open_report"]:
+        webbrowser.open(written["report"].resolve().as_uri())
+
+
+if __name__ == "__main__":
+    main()
+
+
+##### FILE: commit_round.py #####
+
+"""
+commit_round.py
+===============
+Turn a draft round into a decision.
+
+    python commit_round.py runs/2026-09-24_1530_PGT
+
+Reads the folder produced by run_allocation.py, checks that it is still valid,
+and writes it into the session file, reducing everybody's remaining capacity.
+The check matters: if somebody has changed an allowance or committed another
+round since the draft was produced, the capacity the draft was computed against
+no longer exists, and committing it anyway would overbook people. In that case
+this refuses and asks for the round to be run again.
+
+Pass --force only if you are certain the draft is still right.
+"""
+
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+
+import store as stx
+
+SESSION_FILE = "session_2026-27.json"
+
+
+def main(argv: list[str]) -> None:
+    args = [a for a in argv if not a.startswith("--")]
+    force = "--force" in argv
+    if not args:
+        sys.exit("Give the folder to commit, for example:\n"
+                 "  python commit_round.py runs/2026-09-24_1530_PGT")
+
+    folder = Path(args[0])
+    draft_file = folder / "draft.json"
+    if not draft_file.exists():
+        sys.exit(f"No draft.json in {folder}. Is that the folder run_allocation.py made?")
+    draft = json.loads(draft_file.read_text(encoding="utf-8"))
+
+    store = stx.SessionStore(SESSION_FILE)
+    if draft["session"] != store.session:
+        sys.exit(f"This draft belongs to session {draft['session']} but {SESSION_FILE} is "
+                 f"{store.session}. Refusing to mix sessions.")
+
+    drafted_at = draft["params"].get("register_version")
+    if drafted_at != store.version and not force:
+        sys.exit(f"The register has moved from version {drafted_at} to {store.version} since "
+                 "this draft was produced, so an allowance changed or another round was "
+                 "committed. Run the allocation again so it uses the capacity that actually "
+                 "exists. Add --force only if you are certain the draft is still right.")
+
+    already = store.committed_students()
+    clash = [r["student_id"] for r in draft["rows"] if r["student_id"] in already]
+    if clash:
+        sys.exit(f"{len(clash)} of these students already have a supervisor, for example "
+                 f"{', '.join(clash[:5])}. Run the allocation again.")
+
+    rnd = store.commit_rows(draft["rows"], draft["label"], draft["level"],
+                            draft["programmes"], draft["params"])
+    table = store.capacity_table(store.register_dataframe())
+    print(f"Committed {len(rnd['rows'])} pairings as round {rnd['round_id']}")
+    print(f"{table['units_used'].sum():.0f} supervision units now used, "
+          f"{table['units_left'].sum():.0f} left for the rest of the session")
+    print(f"\nWhat is in the session now:")
+    print(store.rounds_summary().to_string(index=False))
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])
+
+
+##### FILE: manage.py #####
+
+"""
+manage.py
+=========
+The occasional jobs: see where the session stands, undo a round, free a
+supervisor's students, export everything for the record.
+
+Run it in PyCharm and a numbered menu appears in the console; type a number and
+press Enter. There is nothing to memorise and no arguments to get right.
+
+    1  Where the session stands
+    2  Undo a round
+    3  A supervisor has withdrawn
+    4  Free particular students
+    5  Export everything
+    6  Check a student file before allocating
+    0  Quit
+
+Everything it does is recorded in the session's audit trail, so a change made
+here can be traced afterwards.
+"""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+import pandas as pd
+
+import matching_core as mc
+import store as stx
+import text_analysis as ta
+
+SESSION_FILE = "session_2026-27.json"
+STUDENTS_FILE = "sample_students.csv"      # used by the file check only
+
+
+def rule(char: str = "-", width: int = 72) -> None:
+    print(char * width)
+
+
+def ask(prompt: str) -> str:
+    try:
+        return input(prompt).strip()
+    except EOFError:
+        return ""
+
+
+def confirm(prompt: str) -> bool:
+    return ask(f"{prompt} Type yes to go ahead: ").lower() in ("yes", "y")
+
+
+# ---------------------------------------------------------------------------
+
+def where_things_stand(store: stx.SessionStore) -> None:
+    register = store.register_dataframe()
+    if not len(register):
+        print("The register is empty. Run setup_session.py first.")
+        return
+    table = store.capacity_table(register)
+    print()
+    rule("=")
+    print(f"Session {store.session}   ·   register version {store.version}")
+    rule("=")
+    print(f"{len(register)} supervisors")
+    print(f"{table['allowance_units'].sum():.0f} supervision units agreed in total, "
+          f"{table['units_used'].sum():.0f} used, {table['units_left'].sum():.0f} left")
+    for level, weight in sorted(store.level_weights.items()):
+        placed = int(table[f"{level}_assigned"].sum())
+        room = int(store.capacity_for_round(register, level).sum())
+        print(f"  {level}: {placed} students placed so far, room for about {room} more "
+              f"(each costs {weight} units)")
+
+    rounds = store.rounds_summary()
+    print()
+    if not len(rounds):
+        print("No rounds committed yet.")
+    else:
+        print("Rounds committed so far")
+        rule()
+        print(rounds.to_string(index=False))
+
+    busiest = table.sort_values("units_left").head(8)
+    print()
+    print("Closest to full")
+    rule()
+    print(busiest[["name", "group", "allowance_units", "units_used", "units_left"]]
+          .to_string(index=False))
+
+    idle = table[table["units_used"] == 0]
+    if len(idle):
+        print(f"\n{len(idle)} supervisors have taken nobody at all this session.")
+
+
+def undo_a_round(store: stx.SessionStore) -> None:
+    rounds = store.data.get("rounds", [])
+    if not rounds:
+        print("There is nothing to undo.")
+        return
+    print()
+    for i, r in enumerate(rounds, start=1):
+        print(f"  {i}  {r['label']}")
+        print(f"     committed {r['timestamp']}, {len(r['rows'])} students, id {r['round_id']}")
+    choice = ask("\nWhich number? (Enter to cancel) ")
+    if not choice.isdigit() or not (1 <= int(choice) <= len(rounds)):
+        print("Cancelled.")
+        return
+    target = rounds[int(choice) - 1]
+    print(f"\nThis will remove {len(target['rows'])} pairings and give the capacity back.")
+    if not confirm("The students involved will have no supervisor again."):
+        print("Cancelled.")
+        return
+    store.rollback(target["round_id"])
+    print(f"Undone. {target['label']} is no longer in the session.")
+
+
+def supervisor_withdrew(store: stx.SessionStore) -> None:
+    register = store.register_dataframe()
+    name = ask("Supervisor's name or id: ")
+    if not name:
+        print("Cancelled.")
+        return
+    matches = register[
+        register["name"].str.contains(name, case=False, na=False)
+        | (register["supervisor_id"].str.lower() == name.lower())]
+    if not len(matches):
+        print("Nobody of that name is on the register.")
+        return
+    if len(matches) > 1:
+        print("\nMore than one match:")
+        for _, row in matches.iterrows():
+            print(f"  {row['supervisor_id']}  {row['name']}  ({row['group']})")
+        print("Run this again with the id.")
+        return
+
+    row = matches.iloc[0]
+    print(f"\n{row['name']} ({row['supervisor_id']}, {row['group']})")
+    if not confirm("Free all of their students and mark them unavailable?"):
+        print("Cancelled.")
+        return
+    affected = store.release_supervisor(row["supervisor_id"])
+    store.update_supervisor(row["supervisor_id"], {"available": 0})
+    print(f"\n{len(affected)} students are now without a supervisor:")
+    for sid in affected:
+        print(f"  {sid}")
+    if affected:
+        print("\nPut these student numbers into a small CSV of their own and run "
+              "run_allocation.py against it to place them, leaving everybody else alone.")
+
+
+def free_students(store: stx.SessionStore) -> None:
+    raw = ask("Student numbers, separated by commas: ")
+    ids = [x.strip() for x in raw.replace("\n", ",").split(",") if x.strip()]
+    if not ids:
+        print("Cancelled.")
+        return
+    removed = store.release_students(ids)
+    print(f"{removed} pairings removed. Those students have no supervisor again.")
+
+
+def export_everything(store: stx.SessionStore) -> None:
+    out = Path(ask("Folder to write into (Enter for 'exports'): ") or "exports")
+    out.mkdir(parents=True, exist_ok=True)
+    register = store.register_dataframe()
+
+    rows = store.committed_rows()
+    if len(rows):
+        rows.to_csv(out / "all_allocations.csv", index=False, encoding="utf-8-sig")
+    if len(register):
+        store.capacity_table(register).to_csv(out / "register_remaining.csv", index=False,
+                                              encoding="utf-8-sig")
+    summary = store.rounds_summary()
+    if len(summary):
+        summary.to_csv(out / "rounds.csv", index=False, encoding="utf-8-sig")
+    trail = store.audit_trail()
+    if len(trail):
+        trail.to_csv(out / "audit_trail.csv", index=False, encoding="utf-8-sig")
+    import shutil
+    shutil.copy2(store.path, out / Path(store.path).name)
+    print(f"\nWritten to {out.resolve()}:")
+    for f in sorted(out.iterdir()):
+        print(f"  {f.name}")
+
+
+def check_student_file(store: stx.SessionStore) -> None:
+    path = ask(f"Student file (Enter for '{STUDENTS_FILE}'): ") or STUDENTS_FILE
+    p = Path(path)
+    if not p.exists():
+        print(f"Cannot find {path}.")
+        return
+    students = pd.read_excel(p, dtype=str).fillna("") if p.suffix.lower() in (".xlsx", ".xls") \
+        else pd.read_csv(p, encoding="utf-8-sig", dtype=str).fillna("")
+
+    register = store.register_dataframe()
+    probe = register.copy()
+    probe["workload"] = 0
+    problems = [i for i in mc.validate_inputs(students, probe) if "capacity" not in i.lower()]
+
+    print()
+    rule("=")
+    print(f"{path}: {len(students)} rows")
+    rule("=")
+    already = len(store.committed_students() & set(students["student_id"]))
+    print(f"{already} of them already have a supervisor from an earlier round")
+    if "level" in students.columns and "programme" in students.columns:
+        print()
+        print(students.groupby(["level", "programme"]).size()
+              .reset_index(name="students").to_string(index=False))
+    if problems:
+        print("\nWorth fixing before you allocate:")
+        for msg in problems:
+            print(f"  - {msg}")
+    else:
+        print("\nNo problems with the file itself.")
+
+    req = ta.requirements_table(students)
+    print()
+    print(f"{int(req['ethics_review_likely'].sum())} proposals look like they need ethics "
+          "approval")
+    print(f"{int(req['needs_data_access_check'].sum())} depend on data the student may not "
+          "have yet")
+    thin = req[req["word_count"] < 25]
+    if len(thin):
+        print(f"{len(thin)} proposals are under 25 words, which is too little to match on. "
+              "These are the ones that come out unplaced.")
+
+    trim = mc.tag_limit_report(register)
+    if len(trim):
+        print(f"\n{len(trim)} supervisors have more tags than agreed; the extras are ignored.")
+
+
+MENU = [
+    ("Where the session stands", where_things_stand),
+    ("Undo a round", undo_a_round),
+    ("A supervisor has withdrawn", supervisor_withdrew),
+    ("Free particular students", free_students),
+    ("Export everything", export_everything),
+    ("Check a student file before allocating", check_student_file),
+]
+
+
+def main() -> None:
+    store = stx.SessionStore(SESSION_FILE)
+    while True:
+        print()
+        rule("=")
+        print(f"Dissertation allocation  ·  session {store.session}  ·  {SESSION_FILE}")
+        rule("=")
+        for i, (label, _) in enumerate(MENU, start=1):
+            print(f"  {i}  {label}")
+        print("  0  Quit")
+        choice = ask("\nNumber: ")
+        if choice in ("0", "q", "quit", ""):
+            return
+        if not choice.isdigit() or not (1 <= int(choice) <= len(MENU)):
+            print("Type one of the numbers listed.")
+            continue
+        try:
+            store.ensure_fresh()
+            MENU[int(choice) - 1][1](store)
+        except stx.ConcurrentEditError as exc:
+            print(f"\n{exc}")
+        except KeyboardInterrupt:
+            print("\nCancelled.")
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        sys.exit(0)
+
+
+##### FILE: matching_core.py #####
+
+"""
+matching_core.py
+================
+Scoring and optimisation core for undergraduate dissertation allocation.
+
+The allocation is arithmetic and nothing else: no model, no service, no
+randomness. Given the same two CSV files and the same parameters it returns
+exactly the same allocation, and every pairing can be explained by pointing at
+what the student and the supervisor have in common. That is what a teaching
+operations office needs when a student queries the outcome months later.
+
+Two solution engines are provided.
+
+1. ``lp``  - the transportation-LP path. Every constraint except the mismatch
+   tolerance is a pure assignment/capacity constraint, so the constraint matrix
+   is totally unimodular and the LP vertex returned by HiGHS is integral
+   without any branching. The tolerance is enforced by Lagrangian bisection on
+   a penalty applied to below-threshold pairs, so the whole procedure is a
+   handful of LP solves and stays fast at faculty scale.
+
+2. ``milp`` - the exact path. The tolerance becomes a genuine cardinality
+   constraint and the model is handed to CBC, HiGHS or Gurobi through PuLP.
+   Slower in principle, still trivial at this size, and useful as a cross-check
+   on the bisection result.
+"""
+
+from __future__ import annotations
+
+import math
+import re
+import time
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Sequence, Tuple
+
+import numpy as np
+import pandas as pd
+from scipy.optimize import linprog
+from scipy.sparse import coo_matrix
+
+import text_analysis as ta
+
+__version__ = "2.0.0"
+
+# ---------------------------------------------------------------------------
+# Expected columns
+# ---------------------------------------------------------------------------
+
+SUPERVISOR_COLUMNS = {
+    "supervisor_id": True,      # required
+    "name": True,
+    "group": True,              # one of the six subject groups
+    "research_areas": True,     # semicolon separated tags
+    "methods": True,            # semicolon separated tags
+    "keywords": False,          # free text, publications, past topics
+    "workload": False,          # headcount open to THIS round; supplied by the store
+    "min_load": False,          # lower bound on number supervised
+    "available": False,         # 1/0, sabbatical or leave sets this to 0
+}
+
+STUDENT_COLUMNS = {
+    "student_id": True,         # target ID, the only identifier that travels
+    "name": False,
+    "programme": False,
+    "project_title": True,
+    "abstract": True,
+    "project_name": False,      # student's own working name for the project
+    "areas": False,             # tags as declared by the student
+    "methods": False,
+    "references": False,        # free text reference list
+    "preferred_supervisor_id": False,
+    "preferred_group": False,
+    "locked_supervisor_id": False,   # office override, forced assignment
+}
+
+CJK_RE = re.compile(r"[\u4e00-\u9fff]")
+SPLIT_RE = re.compile(r"[;；,，/|]+")
+
+
+# ---------------------------------------------------------------------------
+# Tag handling
+# ---------------------------------------------------------------------------
+
+MAX_AREA_TAGS = 4
+MAX_METHOD_TAGS = 6
+TAG_RANK_DECAY = 0.82      # the first tag a supervisor lists counts for most
+
+
+def split_tags(value, limit: Optional[int] = None) -> List[str]:
+    """Split a tag cell into a clean lowercase list, optionally truncated.
+
+    Order is preserved and treated as meaningful. A supervisor asked for at
+    most four areas will put the one they actually want to supervise first, so
+    the position of a tag carries information that is thrown away by treating
+    the cell as an unordered set.
+    """
+    if value is None or (isinstance(value, float) and math.isnan(value)):
+        return []
+    out = []
+    for part in SPLIT_RE.split(str(value)):
+        tag = part.strip().lower()
+        if tag and tag not in out:
+            out.append(tag)
+    return out[:limit] if limit else out
+
+
+def rank_weights(n: int) -> np.ndarray:
+    if n <= 0:
+        return np.zeros(0)
+    w = np.array([TAG_RANK_DECAY ** r for r in range(n)])
+    return w / w.sum()
+
+
+def expand_with_synonyms(tags: Sequence[str], synonyms: Dict[str, str]) -> List[str]:
+    """Map each tag onto its canonical form, preserving order."""
+    out = []
+    for t in tags:
+        canonical = synonyms.get(t, t)
+        if canonical not in out:
+            out.append(canonical)
+    return out
+
+
+def weighted_jaccard(a: set, b: set) -> float:
+    if not a or not b:
+        return 0.0
+    union = len(a | b)
+    return len(a & b) / union if union else 0.0
+
+
+def ranked_overlap(student_tags: Sequence[str], supervisor_tags: Sequence[str]) -> float:
+    """Overlap that respects the order in which both sides listed their tags.
+
+    The student's tags set what has to be covered and the supervisor's order
+    sets how strongly each of theirs counts, so a supervisor whose first-listed
+    area is the student's topic scores above one who lists it fourth, and a
+    supervisor with a broad profile is not punished for the parts of it that go
+    unused.
+    """
+    if not student_tags or not supervisor_tags:
+        return 0.0
+    s_w = rank_weights(len(student_tags))
+    t_w = rank_weights(len(supervisor_tags))
+    t_pos = {tag: k for k, tag in enumerate(supervisor_tags)}
+
+    covered = 0.0
+    for i, tag in enumerate(student_tags):
+        k = t_pos.get(tag)
+        if k is not None:
+            covered += s_w[i] * (0.6 + 0.4 * t_w[k] / t_w[0])
+    symmetry = weighted_jaccard(set(student_tags), set(supervisor_tags))
+    return float(np.clip(0.75 * covered + 0.25 * symmetry, 0.0, 1.0))
+
+
+# ---------------------------------------------------------------------------
+# Method taxonomy
+# ---------------------------------------------------------------------------
+
+DEFAULT_METHOD_TAXONOMY: Dict[str, List[str]] = {
+    "quantitative": [
+        "regression", "econometrics", "machine learning", "optimisation",
+        "simulation", "survey", "experiment", "network analysis",
+        "time series", "panel data", "statistical testing",
+    ],
+    "qualitative": [
+        "interview", "case study", "focus group", "ethnography",
+        "discourse analysis", "grounded theory", "content analysis",
+        "systematic review",
+    ],
+    "mixed": ["text mining", "mixed methods"],
+}
+
+PARADIGMS = ("quantitative", "qualitative", "mixed", "both")
+PARADIGM_CREDIT = 0.80       # a student who can only name the paradigm
+SIBLING_CREDIT = 0.45        # a different method inside the same paradigm
+
+
+class MethodTaxonomy:
+    """Two-level map from a named method to the paradigm it belongs to.
+
+    Undergraduates in particular can often place their project as qualitative
+    or quantitative and go no further, while supervisors describe themselves in
+    specific techniques. Without a hierarchy those two vocabularies simply fail
+    to intersect and every such student scores zero against every supervisor,
+    which the optimiser then reports as a supply problem that does not exist.
+    """
+
+    def __init__(self, mapping: Optional[Dict[str, List[str]]] = None):
+        self.mapping = {k: list(v) for k, v in (mapping or DEFAULT_METHOD_TAXONOMY).items()}
+        self.parent_of: Dict[str, str] = {}
+        for paradigm, leaves in self.mapping.items():
+            for leaf in leaves:
+                self.parent_of[leaf.strip().lower()] = paradigm
+
+    def paradigms_of(self, tags: Sequence[str]) -> set:
+        out = set()
+        for t in tags:
+            if t in PARADIGMS:
+                out.add("mixed" if t == "both" else t)
+            elif t in self.parent_of:
+                out.add(self.parent_of[t])
+        if "mixed" in out:
+            out |= {"quantitative", "qualitative"}
+        return out
+
+    def similarity(self, student_tags: Sequence[str], supervisor_tags: Sequence[str]) -> float:
+        if not student_tags or not supervisor_tags:
+            return 0.0
+        sup_set = set(supervisor_tags)
+        sup_paradigms = self.paradigms_of(supervisor_tags)
+        s_w = rank_weights(len(student_tags))
+
+        total = 0.0
+        for i, tag in enumerate(student_tags):
+            if tag in PARADIGMS:
+                wanted = {"quantitative", "qualitative"} if tag in ("mixed", "both") else {tag}
+                if wanted <= sup_paradigms:
+                    breadth = sum(1 for t in supervisor_tags
+                                  if self.parent_of.get(t) in wanted)
+                    credit = PARADIGM_CREDIT + (0.1 if breadth >= 2 else 0.0)
+                elif wanted & sup_paradigms:
+                    credit = PARADIGM_CREDIT * 0.5
+                else:
+                    credit = 0.0
+            elif tag in sup_set:
+                credit = 1.0
+            elif self.parent_of.get(tag) in sup_paradigms:
+                credit = SIBLING_CREDIT
+            else:
+                credit = 0.0
+            total += s_w[i] * credit
+        return float(np.clip(total, 0.0, 1.0))
+
+
+# ---------------------------------------------------------------------------
+# Score matrix
+# ---------------------------------------------------------------------------
+
+@dataclass
+class ScoreWeights:
+    area: float = 0.32
+    method: float = 0.24
+    text: float = 0.16
+    phrase: float = 0.18
+    preference: float = 0.05
+    same_group: float = 0.05
+
+    def normalised(self) -> "ScoreWeights":
+        total = (self.area + self.method + self.text + self.phrase
+                 + self.preference + self.same_group)
+        if total <= 0:
+            raise ValueError("The sum of the weights must be positive")
+        return ScoreWeights(self.area / total, self.method / total, self.text / total,
+                            self.phrase / total, self.preference / total,
+                            self.same_group / total)
+
+
+def _fallback_similarity(student_texts: List[str], supervisor_texts: List[str]) -> np.ndarray:
+    stoks = [set(re.findall(r"\w+", t.lower())) for t in student_texts]
+    ttoks = [set(re.findall(r"\w+", t.lower())) for t in supervisor_texts]
+    out = np.zeros((len(stoks), len(ttoks)))
+    for i, a in enumerate(stoks):
+        for j, b in enumerate(ttoks):
+            out[i, j] = weighted_jaccard(a, b)
+    return out
+
+
+def concat_columns(df: pd.DataFrame, cols: Sequence[str]) -> List[str]:
+    out = []
+    for _, row in df.iterrows():
+        parts = [str(row[c]) for c in cols if c in df.columns and pd.notna(row.get(c))]
+        out.append(" ".join(parts))
+    return out
+
+
+def build_score_matrix(
+    students: pd.DataFrame,
+    supervisors: pd.DataFrame,
+    weights: ScoreWeights = ScoreWeights(),
+    synonyms: Optional[Dict[str, str]] = None,
+    taxonomy: Optional[MethodTaxonomy] = None,
+    latent_share: float = 0.5,
+) -> Tuple[np.ndarray, Dict[str, object]]:
+    """Return the student by supervisor score matrix in [0, 1], plus its parts.
+
+    The components dictionary carries the evidence as well as the numbers: the
+    key phrases extracted from each proposal, and, for every pair, the phrases
+    that the supervisor's profile actually contains. That is what turns a score
+    into an explanation.
+    """
+    synonyms = synonyms or {}
+    taxonomy = taxonomy or MethodTaxonomy()
+    w = weights.normalised()
+
+    blank = pd.Series([""] * len(students))
+    s_areas = [expand_with_synonyms(split_tags(v, MAX_AREA_TAGS), synonyms)
+               for v in students.get("areas", blank)]
+    s_methods = [expand_with_synonyms(split_tags(v, MAX_METHOD_TAGS), synonyms)
+                 for v in students.get("methods", blank)]
+    t_areas = [expand_with_synonyms(split_tags(v, MAX_AREA_TAGS), synonyms)
+               for v in supervisors["research_areas"]]
+    t_methods = [expand_with_synonyms(split_tags(v, MAX_METHOD_TAGS), synonyms)
+                 for v in supervisors["methods"]]
+
+    n, m = len(students), len(supervisors)
+    area = np.zeros((n, m))
+    method = np.zeros((n, m))
+    for i in range(n):
+        for j in range(m):
+            area[i, j] = ranked_overlap(s_areas[i], t_areas[j])
+            method[i, j] = taxonomy.similarity(s_methods[i], t_methods[j])
+
+    # The reference list is deliberately excluded from the text model: it
+    # contributes author surnames rather than subject matter, which pollutes the
+    # key phrases and is of no use in deciding who should supervise the work.
+    student_text = concat_columns(
+        students, ["project_title", "abstract", "areas", "methods"])
+    supervisor_text = concat_columns(supervisors, ["research_areas", "methods", "keywords"])
+
+    model = ta.fit_text_model(student_text, supervisor_text)
+    if model is None:
+        surface = _fallback_similarity(student_text, supervisor_text)
+        latent = surface
+        phrases: List[List[str]] = [[] for _ in range(n)]
+        phrase_score = np.zeros((n, m))
+        phrase_evidence = [[[] for _ in range(m)] for _ in range(n)]
+    else:
+        surface, latent = ta.similarity_matrices(model)
+        phrases = ta.key_phrases(model)
+        phrase_score, phrase_evidence = ta.phrase_overlap(phrases, supervisor_text)
+
+    text = (1 - latent_share) * surface + latent_share * latent
+    if text.size and text.max() > 0:
+        text = text / text.max()
+
+    pref = np.zeros((n, m))
+    sup_index = {str(sid): j for j, sid in enumerate(supervisors["supervisor_id"])}
+    if "preferred_supervisor_id" in students.columns:
+        for i, v in enumerate(students["preferred_supervisor_id"]):
+            j = sup_index.get(str(v).strip())
+            if j is not None:
+                pref[i, j] = 1.0
+
+    same_group = np.zeros((n, m))
+    if "preferred_group" in students.columns:
+        sup_groups = [str(g).strip().lower() for g in supervisors["group"]]
+        for i, g in enumerate(students["preferred_group"]):
+            gs = str(g).strip().lower()
+            if not gs or gs == "nan":
+                continue
+            for j, sg in enumerate(sup_groups):
+                if sg == gs:
+                    same_group[i, j] = 1.0
+
+    score = (w.area * area + w.method * method + w.text * text + w.phrase * phrase_score
+             + w.preference * pref + w.same_group * same_group)
+
+    components = {
+        "area": area, "method": method, "text": text, "phrase": phrase_score,
+        "preference": pref, "same_group": same_group,
+        "student_phrases": phrases, "phrase_evidence": phrase_evidence,
+        "student_areas": s_areas, "student_methods": s_methods,
+        "supervisor_areas": t_areas, "supervisor_methods": t_methods,
+    }
+    return np.clip(score, 0.0, 1.0), components
+
+
+def explain_pair(components: Dict[str, object], i: int, j: int, max_items: int = 4) -> str:
+    """One readable line saying why a particular pairing scored as it did."""
+    bits = []
+    shared_areas = [a for a in components["student_areas"][i]
+                    if a in components["supervisor_areas"][j]]
+    if shared_areas:
+        bits.append("areas: " + ", ".join(shared_areas[:max_items]))
+    shared_methods = [mth for mth in components["student_methods"][i]
+                      if mth in components["supervisor_methods"][j]]
+    if shared_methods:
+        bits.append("methods: " + ", ".join(shared_methods[:max_items]))
+    elif components["method"][i, j] > 0.3:
+        bits.append("method paradigm aligns")
+    evidence = components["phrase_evidence"][i][j] if components.get("phrase_evidence") else []
+    if evidence:
+        bits.append("proposal terms: " + ", ".join(evidence[:max_items]))
+    return "; ".join(bits) if bits else "text similarity only"
+
+
+def tag_limit_report(supervisors: pd.DataFrame) -> pd.DataFrame:
+    """Which supervisors exceeded the agreed number of tags, and by how much."""
+    rows = []
+    for _, row in supervisors.iterrows():
+        areas = split_tags(row.get("research_areas", ""))
+        methods = split_tags(row.get("methods", ""))
+        if len(areas) > MAX_AREA_TAGS or len(methods) > MAX_METHOD_TAGS:
+            rows.append({
+                "supervisor_id": row.get("supervisor_id"),
+                "name": row.get("name", ""),
+                "areas_given": len(areas),
+                "areas_kept": MAX_AREA_TAGS,
+                "areas_dropped": "; ".join(areas[MAX_AREA_TAGS:]),
+                "methods_given": len(methods),
+                "methods_kept": MAX_METHOD_TAGS,
+                "methods_dropped": "; ".join(methods[MAX_METHOD_TAGS:]),
+            })
+    return pd.DataFrame(rows)
+
+
+# ---------------------------------------------------------------------------
+# Candidate sparsification
+# ---------------------------------------------------------------------------
+
+@dataclass
+class Candidates:
+    """Sparse pair list: the model only ever sees admissible pairs."""
+    rows: np.ndarray            # student index per pair
+    cols: np.ndarray            # supervisor index per pair
+    scores: np.ndarray          # match score per pair
+    n_students: int = 0
+    n_supervisors: int = 0
+    forced: Dict[int, int] = field(default_factory=dict)   # student -> supervisor
+
+    def __len__(self) -> int:
+        return len(self.rows)
+
+
+def build_candidates(
+    score: np.ndarray,
+    hard_floor: float,
+    top_k: int = 25,
+    restrict_to_group: bool = False,
+    student_groups: Optional[Sequence[str]] = None,
+    supervisor_groups: Optional[Sequence[str]] = None,
+    locked: Optional[Dict[int, int]] = None,
+    unavailable: Optional[Sequence[int]] = None,
+    blocked_pairs: Optional[set] = None,
+    eligibility: Optional[np.ndarray] = None,
+) -> Candidates:
+    """Keep only pairs that clear the hard floor, within the top_k per student.
+
+    This is where the problem size is actually decided: with 900 students and
+    150 supervisors the dense matrix has 135,000 pairs, while top_k = 25 leaves
+    22,500 columns, which any solver disposes of instantly.
+
+    ``blocked_pairs`` is a set of (student_index, supervisor_index) that must
+    never be assigned, which is how a conflict of interest or a declared
+    personal relationship is handled. ``eligibility`` is an optional boolean
+    matrix for supervisors who only take certain programmes.
+    """
+    n, m = score.shape
+    locked = locked or {}
+    blocked = set(unavailable or [])
+    blocked_pairs = blocked_pairs or set()
+
+    rows, cols, vals = [], [], []
+    for i in range(n):
+        if i in locked:
+            j = locked[i]
+            rows.append(i); cols.append(j); vals.append(score[i, j])
+            continue
+        row = score[i].copy()
+        for j in blocked:
+            row[j] = -1.0
+        for (bi, bj) in blocked_pairs:
+            if bi == i:
+                row[bj] = -1.0
+        if eligibility is not None:
+            row = np.where(eligibility[i], row, -1.0)
+        if restrict_to_group and student_groups is not None and supervisor_groups is not None:
+            g = str(student_groups[i]).strip().lower()
+            if g and g != "nan":
+                for j in range(m):
+                    if str(supervisor_groups[j]).strip().lower() != g:
+                        row[j] = -1.0
+        eligible = np.where(row >= hard_floor)[0]
+        if len(eligible) > top_k:
+            order = eligible[np.argsort(-row[eligible])][:top_k]
+        else:
+            order = eligible
+        for j in order:
+            rows.append(i); cols.append(int(j)); vals.append(float(score[i, j]))
+
+    return Candidates(np.array(rows, dtype=int), np.array(cols, dtype=int),
+                      np.array(vals, dtype=float), n, m, dict(locked))
+
+
+# ---------------------------------------------------------------------------
+# Optimisation parameters
+# ---------------------------------------------------------------------------
+
+@dataclass
+class AllocationParams:
+    good_threshold: float = 0.55      # at or above this score a pairing counts as a good match
+    tolerance: float = 0.10           # share of allocations permitted below that threshold
+    unassigned_penalty: float = 5.0   # how strongly the model prefers a weak match to none
+    min_load_penalty: float = 2.0
+    engine: str = "lp"                # lp | milp
+    milp_solver: str = "auto"         # auto | CBC | HiGHS | GUROBI
+    time_limit: int = 120
+
+
+@dataclass
+class AllocationResult:
+    assignment: pd.DataFrame
+    total_score: float
+    n_assigned: int
+    n_unassigned: int
+    n_below_good: int
+    tolerance_used: float
+    engine: str
+    solve_seconds: float
+    lagrange_lambda: Optional[float] = None
+    loads: Optional[pd.DataFrame] = None
+    log: List[str] = field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Engine 1: transportation LP with Lagrangian bisection on the tolerance
+# ---------------------------------------------------------------------------
+
+def _solve_transport_lp(
+    cand: Candidates,
+    capacity: np.ndarray,
+    min_load: np.ndarray,
+    params: AllocationParams,
+    lam: float,
+    group_index: Optional[Sequence[int]] = None,
+    group_caps: Optional[Sequence[float]] = None,
+) -> Tuple[np.ndarray, float]:
+    """One transportation LP with penalty ``lam`` on below-threshold pairs.
+
+    Columns: one per candidate pair, one unassigned slack per student, one
+    shortfall slack per supervisor min-load. The matrix is a node-arc incidence
+    matrix and therefore totally unimodular, so the simplex vertex is integral.
+    """
+    n, m = cand.n_students, cand.n_supervisors
+    npairs = len(cand)
+
+    bad = (cand.scores < params.good_threshold).astype(float)
+    c_pairs = -(cand.scores) + lam * bad
+    c_unassigned = np.full(n, params.unassigned_penalty)
+    c_shortfall = np.full(m, params.min_load_penalty)
+    c = np.concatenate([c_pairs, c_unassigned, c_shortfall])
+
+    # each student assigned exactly once, or explicitly left unassigned
+    eq_rows = np.concatenate([cand.rows, np.arange(n)])
+    eq_cols = np.concatenate([np.arange(npairs), npairs + np.arange(n)])
+    eq_data = np.ones(len(eq_rows))
+    A_eq = coo_matrix((eq_data, (eq_rows, eq_cols)), shape=(n, npairs + n + m)).tocsr()
+    b_eq = np.ones(n)
+
+    # capacity, then min load with a shortfall slack, then optional group caps.
+    # Supervisors partition into groups, so the capacity family is laminar and
+    # the whole system is still a flow network of the form
+    # student -> supervisor -> group -> sink, which keeps integrality intact.
+    ncols_total = npairs + n + m
+    ub_rows = [cand.cols, m + cand.cols, m + np.arange(m)]
+    ub_cols = [np.arange(npairs), np.arange(npairs), npairs + n + np.arange(m)]
+    ub_data = [np.ones(npairs), -np.ones(npairs), -np.ones(m)]
+    b_parts = [capacity, -min_load]
+    n_rows = 2 * m
+
+    if group_caps is not None and group_index is not None and len(group_caps):
+        gi = np.asarray(group_index)[cand.cols]
+        ub_rows.append(n_rows + gi)
+        ub_cols.append(np.arange(npairs))
+        ub_data.append(np.ones(npairs))
+        b_parts.append(np.asarray(group_caps, dtype=float))
+        n_rows += len(group_caps)
+
+    A_ub = coo_matrix((np.concatenate(ub_data),
+                       (np.concatenate(ub_rows), np.concatenate(ub_cols))),
+                      shape=(n_rows, ncols_total)).tocsr()
+    b_ub = np.concatenate(b_parts)
+
+    bounds = [(0, 1)] * npairs + [(0, 1)] * n + [(0, None)] * m
+    res = linprog(c, A_ub=A_ub, b_ub=b_ub, A_eq=A_eq, b_eq=b_eq,
+                  bounds=bounds, method="highs")
+    if not res.success:
+        raise RuntimeError(f"LP solve failed: {res.message}")
+    x = np.asarray(res.x[:npairs])
+    return x, float(res.fun)
+
+
+def solve_lp(cand: Candidates, capacity: np.ndarray, min_load: np.ndarray,
+             params: AllocationParams,
+             group_index: Optional[Sequence[int]] = None,
+             group_caps: Optional[Sequence[float]] = None) -> Tuple[np.ndarray, Dict]:
+    """Bisect the multiplier until the share of poor matches meets tolerance."""
+    t0 = time.time()
+    log = []
+    limit = int(math.floor(params.tolerance * cand.n_students))
+
+    x, _ = _solve_transport_lp(cand, capacity, min_load, params, 0.0, group_index, group_caps)
+    bad = int(round(float(((cand.scores < params.good_threshold) * x).sum())))
+    log.append(f"At lambda = 0, {bad} allocations fall below the good-match threshold; the tolerance allows {limit}.")
+    if bad <= limit:
+        return x, {"lambda": 0.0, "log": log, "seconds": time.time() - t0}
+
+    lo, hi = 0.0, 1.0
+    for _ in range(20):
+        x_hi, _ = _solve_transport_lp(cand, capacity, min_load, params, hi, group_index, group_caps)
+        bad_hi = int(round(float(((cand.scores < params.good_threshold) * x_hi).sum())))
+        if bad_hi <= limit:
+            break
+        hi *= 2
+        if hi > 64:
+            log.append("Even a very large penalty cannot meet the tolerance, which means the candidate pool itself is too thin rather than the model being at fault.")
+            return x_hi, {"lambda": hi, "log": log, "seconds": time.time() - t0}
+
+    best_x = x_hi
+    for _ in range(24):
+        mid = 0.5 * (lo + hi)
+        x_mid, _ = _solve_transport_lp(cand, capacity, min_load, params, mid, group_index, group_caps)
+        bad_mid = int(round(float(((cand.scores < params.good_threshold) * x_mid).sum())))
+        if bad_mid <= limit:
+            hi, best_x = mid, x_mid
+        else:
+            lo = mid
+        if hi - lo < 1e-4:
+            break
+    log.append(f"Bisection converged at multiplier lambda = {hi:.4f}.")
+    return best_x, {"lambda": hi, "log": log, "seconds": time.time() - t0}
+
+
+# ---------------------------------------------------------------------------
+# Engine 2: exact MILP through PuLP
+# ---------------------------------------------------------------------------
+
+def solve_milp(cand: Candidates, capacity: np.ndarray, min_load: np.ndarray,
+               params: AllocationParams,
+               group_index: Optional[Sequence[int]] = None,
+               group_caps: Optional[Sequence[float]] = None) -> Tuple[np.ndarray, Dict]:
+    import pulp
+
+    t0 = time.time()
+    npairs = len(cand)
+    n, m = cand.n_students, cand.n_supervisors
+    limit = int(math.floor(params.tolerance * n))
+
+    prob = pulp.LpProblem("dissertation_allocation", pulp.LpMaximize)
+    x = [pulp.LpVariable(f"x_{k}", cat="Binary") for k in range(npairs)]
+    u = [pulp.LpVariable(f"u_{i}", cat="Binary") for i in range(n)]
+    s = [pulp.LpVariable(f"s_{j}", lowBound=0) for j in range(m)]
+
+    prob += (pulp.lpSum(cand.scores[k] * x[k] for k in range(npairs))
+             - params.unassigned_penalty * pulp.lpSum(u)
+             - params.min_load_penalty * pulp.lpSum(s))
+
+    by_student: Dict[int, List[int]] = {}
+    by_supervisor: Dict[int, List[int]] = {}
+    for k in range(npairs):
+        by_student.setdefault(int(cand.rows[k]), []).append(k)
+        by_supervisor.setdefault(int(cand.cols[k]), []).append(k)
+
+    for i in range(n):
+        prob += pulp.lpSum(x[k] for k in by_student.get(i, [])) + u[i] == 1
+    for j in range(m):
+        ks = by_supervisor.get(j, [])
+        prob += pulp.lpSum(x[k] for k in ks) <= float(capacity[j])
+        if min_load[j] > 0:
+            prob += pulp.lpSum(x[k] for k in ks) + s[j] >= float(min_load[j])
+
+    if group_caps is not None and group_index is not None and len(group_caps):
+        gi = np.asarray(group_index)
+        for g, cap_g in enumerate(group_caps):
+            ks = [k for k in range(npairs) if gi[int(cand.cols[k])] == g]
+            if ks:
+                prob += pulp.lpSum(x[k] for k in ks) <= float(cap_g)
+
+    bad_idx = [k for k in range(npairs) if cand.scores[k] < params.good_threshold]
+    if bad_idx:
+        prob += pulp.lpSum(x[k] for k in bad_idx) <= limit
+
+    solver = _pick_solver(params)
+    prob.solve(solver)
+    status = pulp.LpStatus[prob.status]
+    xv = np.array([v.value() or 0.0 for v in x])
+    return xv, {"log": [f"MILP status: {status}"], "seconds": time.time() - t0,
+                "lambda": None}
+
+
+def _pick_solver(params: AllocationParams):
+    import pulp
+    name = (params.milp_solver or "auto").upper()
+    available = pulp.listSolvers(onlyAvailable=True)
+    order = [name] if name != "AUTO" else ["GUROBI_CMD", "HiGHS_CMD", "PULP_CBC_CMD"]
+    for cand_name in order:
+        for avail in available:
+            if cand_name.upper().startswith(avail.split("_")[0].upper()) or avail.upper().startswith(cand_name.upper()):
+                return pulp.getSolver(avail, msg=False, timeLimit=params.time_limit)
+    return pulp.PULP_CBC_CMD(msg=False, timeLimit=params.time_limit)
+
+
+# ---------------------------------------------------------------------------
+# Public entry point
+# ---------------------------------------------------------------------------
+
+def allocate(
+    students: pd.DataFrame,
+    supervisors: pd.DataFrame,
+    score: np.ndarray,
+    cand: Candidates,
+    params: AllocationParams,
+    capacity: Optional[np.ndarray] = None,
+    group_caps: Optional[Dict[str, float]] = None,
+    components: Optional[Dict[str, object]] = None,
+) -> AllocationResult:
+    """Run one allocation.
+
+    ``capacity`` overrides the workload column, which is how a later round uses
+    the remaining capacity left by earlier rounds rather than the annual figure.
+    ``group_caps`` puts a ceiling on how many students a whole subject group
+    takes, which stops one popular group absorbing an entire cohort.
+
+    Capacity is expressed in headcount for the level being allocated. Where a
+    supervisor's allowance is held in supervision units, the store converts
+    those units into a headcount for the level of the round before calling in,
+    which keeps every coefficient in the capacity rows equal to one and so
+    keeps the constraint matrix integral.
+    """
+    if capacity is None:
+        capacity = supervisors["workload"].astype(float).to_numpy()
+    else:
+        capacity = np.asarray(capacity, dtype=float)
+    if "min_load" in supervisors.columns:
+        min_load = supervisors["min_load"].fillna(0).astype(float).to_numpy()
+    else:
+        min_load = np.zeros(len(supervisors))
+    min_load = np.minimum(min_load, capacity)
+
+    group_index = group_cap_vector = None
+    if group_caps:
+        names = list(group_caps.keys())
+        lookup = {g: k for k, g in enumerate(names)}
+        group_index = [lookup.get(str(g), len(names)) for g in supervisors["group"]]
+        if any(idx == len(names) for idx in group_index):
+            names.append("__other__")
+            group_caps = {**group_caps, "__other__": float(len(students))}
+        group_cap_vector = [float(group_caps[g]) for g in names]
+
+    if params.engine == "milp":
+        x, meta = solve_milp(cand, capacity, min_load, params, group_index, group_cap_vector)
+    else:
+        x, meta = solve_lp(cand, capacity, min_load, params, group_index, group_cap_vector)
+
+    chosen = np.where(x > 0.5)[0]
+    records = []
+    assigned_students = set()
+    for k in chosen:
+        i, j = int(cand.rows[k]), int(cand.cols[k])
+        assigned_students.add(i)
+        records.append({
+            "student_id": students.iloc[i]["student_id"],
+            "project_title": students.iloc[i].get("project_title", ""),
+            "supervisor_id": supervisors.iloc[j]["supervisor_id"],
+            "supervisor_name": supervisors.iloc[j].get("name", ""),
+            "group": supervisors.iloc[j].get("group", ""),
+            "score": round(float(cand.scores[k]), 4),
+            "below_good": bool(cand.scores[k] < params.good_threshold),
+            "locked": i in cand.forced,
+            "rank_for_student": int((score[i] > score[i, j]).sum()) + 1,
+            "evidence": explain_pair(components, i, j) if components else "",
+        })
+    for i in range(len(students)):
+        if i not in assigned_students:
+            records.append({
+                "student_id": students.iloc[i]["student_id"],
+                "project_title": students.iloc[i].get("project_title", ""),
+                "supervisor_id": None,
+                "supervisor_name": "Unassigned",
+                "group": "",
+                "score": float("nan"),
+                "below_good": True,
+                "locked": False,
+                "rank_for_student": None,
+                "evidence": "",
+            })
+
+    assignment = pd.DataFrame(records).sort_values(
+        ["supervisor_name", "score"], ascending=[True, False]).reset_index(drop=True)
+
+    loads = (assignment.dropna(subset=["supervisor_id"])
+             .groupby(["supervisor_id", "supervisor_name", "group"])
+             .agg(assigned=("student_id", "count"), mean_score=("score", "mean"))
+             .reset_index())
+    cap_df = supervisors[["supervisor_id"]].copy()
+    cap_df["workload"] = capacity
+    loads = loads.merge(cap_df, on="supervisor_id", how="right")
+    loads["assigned"] = loads["assigned"].fillna(0).astype(int)
+    loads["spare"] = loads["workload"].astype(int) - loads["assigned"]
+
+    n_unassigned = int(assignment["supervisor_id"].isna().sum())
+    n_assigned = len(assignment) - n_unassigned
+    n_below = int(assignment.loc[assignment["supervisor_id"].notna(), "below_good"].sum())
+
+    return AllocationResult(
+        assignment=assignment,
+        total_score=float(assignment["score"].sum(skipna=True)),
+        n_assigned=n_assigned,
+        n_unassigned=n_unassigned,
+        n_below_good=n_below,
+        tolerance_used=n_below / max(n_assigned, 1),
+        engine=params.engine,
+        solve_seconds=meta["seconds"],
+        lagrange_lambda=meta.get("lambda"),
+        loads=loads,
+        log=meta.get("log", []),
+    )
+
+
+def tolerance_frontier(
+    students: pd.DataFrame,
+    supervisors: pd.DataFrame,
+    score: np.ndarray,
+    cand: Candidates,
+    params: AllocationParams,
+    grid: Sequence[float] = (0.0, 0.05, 0.10, 0.15, 0.20, 0.30, 0.50, 1.0),
+    capacity: Optional[np.ndarray] = None,
+    group_caps: Optional[Dict[str, float]] = None,
+) -> pd.DataFrame:
+    """Trace the trade-off between tolerance and achievable total match quality."""
+    rows = []
+    for t in grid:
+        p = AllocationParams(**{**params.__dict__, "tolerance": t})
+        r = allocate(students, supervisors, score, cand, p, capacity, group_caps)
+        rows.append({
+            "tolerance": t,
+            "total_score": r.total_score,
+            "mean_score": r.total_score / max(r.n_assigned, 1),
+            "below_good": r.n_below_good,
+            "unassigned": r.n_unassigned,
+            "seconds": round(r.solve_seconds, 3),
+        })
+    return pd.DataFrame(rows)
+
+
+# ---------------------------------------------------------------------------
+# Validation helpers for the teaching operations office
+# ---------------------------------------------------------------------------
+
+def validate_inputs(students: pd.DataFrame, supervisors: pd.DataFrame) -> List[str]:
+    issues = []
+    for col, required in SUPERVISOR_COLUMNS.items():
+        if required and col not in supervisors.columns:
+            issues.append(f"The supervisor register is missing a required column: {col}")
+    for col, required in STUDENT_COLUMNS.items():
+        if required and col not in students.columns:
+            issues.append(f"The student file is missing a required column: {col}")
+    if issues:
+        return issues
+
+    if supervisors["supervisor_id"].duplicated().any():
+        issues.append("The supervisor register contains duplicate supervisor_id values")
+    if students["student_id"].duplicated().any():
+        issues.append("The student file contains duplicate student_id values")
+
+    if "workload" not in supervisors.columns:
+        issues.append("No capacity column was supplied for this round")
+        return issues
+    total_capacity = supervisors["workload"].fillna(0).sum()
+    if total_capacity < len(students):
+        issues.append(
+            f"Total capacity of {int(total_capacity)} is below the {len(students)} students in this file, so some students will necessarily be left unassigned")
+    empty_abstract = students["abstract"].fillna("").astype(str).str.strip().eq("").sum()
+    if empty_abstract:
+        issues.append(f"{empty_abstract} students have an empty abstract, so text similarity contributes nothing for them")
+    return issues
+
+
+# ---------------------------------------------------------------------------
+# Diagnostics for handling student queries
+# ---------------------------------------------------------------------------
+
+def diagnose_allocation(
+    result: AllocationResult,
+    score: np.ndarray,
+    cand: Candidates,
+    students: pd.DataFrame,
+    supervisors: pd.DataFrame,
+    capacity: Optional[np.ndarray] = None,
+) -> pd.DataFrame:
+    """Flag the two patterns students actually complain about.
+
+    A *wasteful* pair is a student who would score strictly higher with a
+    supervisor who still has spare capacity, which happens legitimately when a
+    min-load floor or a group cap binds, and which the office needs to be able
+    to explain rather than discover in a meeting.
+
+    A *blocking* pair is a student who would score higher with a supervisor who
+    is full but is carrying someone with a weaker fit, which is the classical
+    instability and the thing that looks unfair when two students compare notes.
+    """
+    if capacity is None:
+        capacity = supervisors["workload"].astype(float).to_numpy()
+
+    sup_pos = {str(s): j for j, s in enumerate(supervisors["supervisor_id"])}
+    stu_pos = {str(s): i for i, s in enumerate(students["student_id"])}
+
+    assigned_of: Dict[int, int] = {}
+    for _, row in result.assignment.iterrows():
+        if pd.isna(row["supervisor_id"]):
+            continue
+        assigned_of[stu_pos[str(row["student_id"])]] = sup_pos[str(row["supervisor_id"])]
+
+    load = np.zeros(len(supervisors))
+    worst = np.full(len(supervisors), np.inf)
+    for i, j in assigned_of.items():
+        load[j] += 1
+        worst[j] = min(worst[j], score[i, j])
+    spare = capacity - load
+
+    records = []
+    for k in range(len(cand)):
+        i, j2 = int(cand.rows[k]), int(cand.cols[k])
+        own = assigned_of.get(i)
+        current = score[i, own] if own is not None else -1.0
+        if score[i, j2] <= current + 1e-9:
+            continue
+        if spare[j2] > 0:
+            kind = "wasteful"
+        elif worst[j2] < score[i, j2] - 1e-9:
+            kind = "blocking"
+        else:
+            continue
+        records.append({
+            "student_id": students.iloc[i]["student_id"],
+            "current_supervisor": supervisors.iloc[own]["name"] if own is not None else "Unassigned",
+            "current_score": round(float(current), 4) if own is not None else None,
+            "better_supervisor": supervisors.iloc[j2]["name"],
+            "better_score": round(float(score[i, j2]), 4),
+            "type": kind,
+        })
+
+    df = pd.DataFrame(records)
+    if len(df):
+        df = df.sort_values(["type", "better_score"], ascending=[True, False])
+        df = df.drop_duplicates("student_id", keep="first")
+    return df
+
+
+##### FILE: store.py #####
+
+"""
+store.py
+========
+Persistent state for one academic session.
+
+Everything that has to survive between runs lives in a single JSON file scoped
+to an academic session, for example ``session_2026-27.json``:
+
+* the **supervisor register**, which is the authoritative record of who is
+  supervising this session and how much each of them has agreed to take;
+* the **round ledger**, which records every allocation the office has
+  committed, with the parameters that produced it;
+* an **audit trail** of edits, so a change to an allowance can be traced.
+
+The register matters more than it first appears. A supervisor commonly takes
+both undergraduate and postgraduate taught dissertations, and those two
+cohorts are allocated weeks apart. If each round started from a freshly
+uploaded spreadsheet, the second round would have no idea what the first one
+had already committed, and the most popular supervisors would quietly be
+booked twice. Here the register is read and written by the application itself:
+committing a PGT round decrements the same allowance that the UG round will
+later draw on, with no spreadsheet passing between the two.
+
+Allowances are held in **supervision units** rather than in a headcount,
+because a taught masters dissertation is not the same amount of work as an
+undergraduate one. Each level carries a weight, so an allowance of twelve
+units at weights of one for UG and one and a half for PGT means twelve
+undergraduates, or eight masters students, or any combination in between.
+
+Rounds are expected to be single-level. That is not an arbitrary restriction:
+within one level every student consumes the same number of units, so the unit
+allowance converts cleanly into a headcount ceiling and every coefficient in
+the capacity constraints stays equal to one, which is what keeps the linear
+relaxation integral. A mixed-level round would turn the capacity rows into
+knapsack constraints and the model into a generalised assignment problem,
+which is why the application routes such a round to the exact solver and warns
+the office rather than pretending nothing has changed.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import time
+import uuid
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Dict, List, Optional, Sequence
+
+import numpy as np
+import pandas as pd
+
+import matching_core as mc
+
+__version__ = "2.0.0"
+
+DEFAULT_LEVEL_WEIGHTS = {"UG": 1.0, "PGT": 1.5}
+
+PROFILE_FIELDS = ["name", "group", "research_areas", "methods", "keywords",
+                  "programmes", "notes"]
+CAPACITY_FIELDS = ["allowance_units", "min_load", "available"]
+
+
+class ConcurrentEditError(RuntimeError):
+    """Raised when the file on disk has moved on since it was read."""
+
+
+# ---------------------------------------------------------------------------
+# Store
+# ---------------------------------------------------------------------------
+
+class SessionStore:
+    """The supervisor register and the round ledger for one academic session."""
+
+    def __init__(self, path: str | Path, session: str = "2026/27",
+                 level_weights: Optional[Dict[str, float]] = None):
+        self.path = Path(path)
+        if self.path.exists():
+            self.data = json.loads(self.path.read_text(encoding="utf-8"))
+        else:
+            self.data = {
+                "session": session,
+                "version": 0,
+                "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "level_weights": dict(level_weights or DEFAULT_LEVEL_WEIGHTS),
+                "supervisors": {},
+                "rounds": [],
+                "audit": [],
+            }
+            self.save(force=True)
+
+    # -- basics ------------------------------------------------------------
+
+    @property
+    def session(self) -> str:
+        return self.data.get("session", "")
+
+    @property
+    def version(self) -> int:
+        return int(self.data.get("version", 0))
+
+    @property
+    def level_weights(self) -> Dict[str, float]:
+        return dict(self.data.get("level_weights", DEFAULT_LEVEL_WEIGHTS))
+
+    def set_level_weights(self, weights: Dict[str, float], actor: str = "office") -> None:
+        self.data["level_weights"] = {str(k): float(v) for k, v in weights.items()}
+        self._audit(actor, "set_level_weights", detail=json.dumps(weights))
+        self.save()
+
+    def disk_version(self) -> int:
+        if not self.path.exists():
+            return -1
+        try:
+            return int(json.loads(self.path.read_text(encoding="utf-8")).get("version", 0))
+        except Exception:
+            return -1
+
+    def reload(self) -> None:
+        if self.path.exists():
+            self.data = json.loads(self.path.read_text(encoding="utf-8"))
+
+    def ensure_fresh(self) -> bool:
+        """Reload if another process has written since this copy was read."""
+        if self.path.exists() and self.disk_version() != self.version:
+            self.reload()
+            return True
+        return False
+
+    def save(self, force: bool = False) -> None:
+        """Write atomically, refusing to overwrite somebody else's edit.
+
+        Two people in the same office can have the application open at once, so
+        every write first checks that the file on disk is still at the version
+        this copy was read at. A temporary file plus an atomic replace means a
+        crash midway through cannot leave a half-written register behind.
+        """
+        if not force and self.path.exists():
+            on_disk = self.disk_version()
+            if on_disk != self.version:
+                raise ConcurrentEditError(
+                    f"The register on disk has moved to version {on_disk} while this "
+                    f"copy is at version {self.version}, which means somebody else has "
+                    f"saved a change. Reload the register and apply the edit again.")
+        self.data["version"] = self.version + 1
+        self.data["updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        tmp = self.path.with_suffix(self.path.suffix + ".tmp")
+        tmp.write_text(json.dumps(self.data, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(tmp, self.path)
+
+    def _audit(self, actor: str, action: str, subject: str = "", detail: str = "") -> None:
+        self.data.setdefault("audit", []).append({
+            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "actor": actor, "action": action, "subject": subject, "detail": detail,
+        })
+
+    def audit_trail(self) -> pd.DataFrame:
+        return pd.DataFrame(self.data.get("audit", []))
+
+    # -- supervisor register ----------------------------------------------
+
+    def register_dataframe(self) -> pd.DataFrame:
+        rows = []
+        for sid, rec in self.data.get("supervisors", {}).items():
+            row = {"supervisor_id": sid}
+            row.update({k: rec.get(k, "") for k in PROFILE_FIELDS})
+            row["allowance_units"] = float(rec.get("allowance_units", 0))
+            row["min_load"] = int(rec.get("min_load", 0))
+            row["available"] = int(rec.get("available", 1))
+            for lvl, cap in (rec.get("level_caps") or {}).items():
+                row[f"cap_{lvl}"] = cap
+            rows.append(row)
+        if not rows:
+            return pd.DataFrame(columns=["supervisor_id"] + PROFILE_FIELDS + CAPACITY_FIELDS)
+        return pd.DataFrame(rows).sort_values("supervisor_id").reset_index(drop=True)
+
+    def sync_from_dataframe(self, df: pd.DataFrame, actor: str = "office",
+                            update_allowances: bool = True) -> Dict[str, list]:
+        """Merge an uploaded register into the stored one.
+
+        A merge rather than a replacement, deliberately. Once a round has been
+        committed, wholesale replacement from a spreadsheet would be capable of
+        deleting a supervisor who is already carrying students, so a supervisor
+        who is absent from the upload is reported and left alone rather than
+        removed. Allowances can be held back from the merge when the office has
+        been editing them in the application and the spreadsheet is stale.
+        """
+        report = {"added": [], "updated": [], "absent_from_upload": [], "unchanged": [],
+                  "tags_trimmed": []}
+        supervisors = self.data.setdefault("supervisors", {})
+        seen = set()
+
+        for _, row in df.iterrows():
+            sid = str(row.get("supervisor_id", "")).strip()
+            if not sid:
+                continue
+            seen.add(sid)
+            existing = supervisors.get(sid)
+            record = dict(existing) if existing else {"level_caps": {}}
+
+            changed = False
+            for field in PROFILE_FIELDS:
+                if field not in df.columns:
+                    continue
+                value = "" if pd.isna(row[field]) else str(row[field]).strip()
+                # Supervisors are asked for at most four areas and six methods.
+                # A longer list is trimmed rather than rejected, in the order the
+                # supervisor gave, and the discarded tags are reported so that the
+                # office can go back to them rather than silently losing the tail.
+                if field in ("research_areas", "methods"):
+                    limit = mc.MAX_AREA_TAGS if field == "research_areas" else mc.MAX_METHOD_TAGS
+                    tags = mc.split_tags(value)
+                    if len(tags) > limit:
+                        report["tags_trimmed"].append({
+                            "supervisor_id": sid,
+                            "field": field,
+                            "kept": "; ".join(tags[:limit]),
+                            "dropped": "; ".join(tags[limit:]),
+                        })
+                    value = "; ".join(tags[:limit])
+                if record.get(field, "") != value:
+                    record[field] = value
+                    changed = True
+
+            if update_allowances:
+                if "allowance_units" in df.columns:
+                    new_allowance = float(pd.to_numeric(row["allowance_units"], errors="coerce") or 0)
+                elif "workload" in df.columns:
+                    new_allowance = float(pd.to_numeric(row["workload"], errors="coerce") or 0)
+                else:
+                    new_allowance = float(record.get("allowance_units", 0))
+                if float(record.get("allowance_units", -1)) != new_allowance:
+                    record["allowance_units"] = new_allowance
+                    changed = True
+                for field, caster in (("min_load", int), ("available", int)):
+                    if field in df.columns:
+                        value = caster(pd.to_numeric(row[field], errors="coerce") or 0)
+                        if record.get(field) != value:
+                            record[field] = value
+                            changed = True
+                caps = dict(record.get("level_caps") or {})
+                for col in df.columns:
+                    if col.startswith("cap_"):
+                        lvl = col[4:]
+                        raw = pd.to_numeric(row[col], errors="coerce")
+                        if not pd.isna(raw):
+                            caps[lvl] = int(raw)
+                if caps != (record.get("level_caps") or {}):
+                    record["level_caps"] = caps
+                    changed = True
+
+            record.setdefault("allowance_units", 0.0)
+            record.setdefault("min_load", 0)
+            record.setdefault("available", 1)
+            record.setdefault("level_caps", {})
+            record["updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+
+            if existing is None:
+                supervisors[sid] = record
+                report["added"].append(sid)
+            elif changed:
+                supervisors[sid] = record
+                report["updated"].append(sid)
+            else:
+                report["unchanged"].append(sid)
+
+        report["absent_from_upload"] = [sid for sid in supervisors if sid not in seen]
+        self._audit(actor, "sync_register",
+                    detail=f"added {len(report['added'])}, updated {len(report['updated'])}, "
+                           f"absent {len(report['absent_from_upload'])}, "
+                           f"tag lists trimmed {len(report['tags_trimmed'])}")
+        self.save()
+        return report
+
+    def update_supervisor(self, supervisor_id: str, changes: dict,
+                          actor: str = "office") -> None:
+        rec = self.data["supervisors"].get(str(supervisor_id))
+        if rec is None:
+            raise KeyError(f"Unknown supervisor: {supervisor_id}")
+        for key, value in changes.items():
+            if key.startswith("cap_"):
+                rec.setdefault("level_caps", {})[key[4:]] = int(value)
+            else:
+                rec[key] = value
+        rec["updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        self._audit(actor, "update_supervisor", subject=str(supervisor_id),
+                    detail=json.dumps(changes, ensure_ascii=False, default=str))
+        self.save()
+
+    # -- committed allocations --------------------------------------------
+
+    def committed_rows(self) -> pd.DataFrame:
+        rows = []
+        for r in self.data.get("rounds", []):
+            for row in r.get("rows", []):
+                rows.append({**row, "round_id": r["round_id"], "round_label": r["label"],
+                             "level": r.get("level", ""),
+                             "programmes": ", ".join(r.get("programmes", []))})
+        if not rows:
+            return pd.DataFrame(columns=["student_id", "supervisor_id", "supervisor_name",
+                                         "score", "level", "round_id", "round_label"])
+        return pd.DataFrame(rows)
+
+    def committed_students(self) -> set:
+        rows = self.committed_rows()
+        return set(rows["student_id"].astype(str)) if len(rows) else set()
+
+    def used_units(self, supervisor_ids: Sequence[str]) -> np.ndarray:
+        weights = self.level_weights
+        pos = {str(s): j for j, s in enumerate(supervisor_ids)}
+        used = np.zeros(len(supervisor_ids))
+        for r in self.data.get("rounds", []):
+            w = float(weights.get(r.get("level", ""), 1.0))
+            for row in r.get("rows", []):
+                j = pos.get(str(row["supervisor_id"]))
+                if j is not None:
+                    used[j] += w
+        return used
+
+    def used_headcount(self, supervisor_ids: Sequence[str],
+                       level: Optional[str] = None) -> np.ndarray:
+        pos = {str(s): j for j, s in enumerate(supervisor_ids)}
+        used = np.zeros(len(supervisor_ids))
+        for r in self.data.get("rounds", []):
+            if level is not None and r.get("level") != level:
+                continue
+            for row in r.get("rows", []):
+                j = pos.get(str(row["supervisor_id"]))
+                if j is not None:
+                    used[j] += 1
+        return used
+
+    def capacity_for_round(self, supervisors: pd.DataFrame, level: str) -> np.ndarray:
+        """Headcount each supervisor may still take at this level.
+
+        The unit allowance left over is divided by the weight of this level and
+        rounded down, then trimmed by any cap the supervisor has set for the
+        level itself, and finally by their availability.
+        """
+        ids = [str(s) for s in supervisors["supervisor_id"]]
+        weight = float(self.level_weights.get(level, 1.0))
+        allowance = np.array([float(self.data["supervisors"].get(sid, {})
+                                    .get("allowance_units", 0)) for sid in ids])
+        remaining_units = np.maximum(allowance - self.used_units(ids), 0.0)
+        headcount = np.floor(remaining_units / max(weight, 1e-9))
+
+        level_caps = np.array([
+            float((self.data["supervisors"].get(sid, {}).get("level_caps") or {})
+                  .get(level, np.inf)) for sid in ids])
+        used_at_level = self.used_headcount(ids, level)
+        headcount = np.minimum(headcount, np.maximum(level_caps - used_at_level, 0))
+
+        available = np.array([int(self.data["supervisors"].get(sid, {}).get("available", 1))
+                              for sid in ids])
+        return np.where(available == 1, headcount, 0.0)
+
+    def capacity_table(self, supervisors: Optional[pd.DataFrame] = None,
+                       level: Optional[str] = None) -> pd.DataFrame:
+        reg = self.register_dataframe() if supervisors is None else supervisors
+        ids = [str(s) for s in reg["supervisor_id"]]
+        weights = self.level_weights
+        out = reg[["supervisor_id", "name", "group"]].copy()
+        out["allowance_units"] = [float(self.data["supervisors"].get(s, {})
+                                        .get("allowance_units", 0)) for s in ids]
+        out["units_used"] = self.used_units(ids).round(2)
+        out["units_left"] = (out["allowance_units"] - out["units_used"]).clip(lower=0).round(2)
+        for lvl in weights:
+            out[f"{lvl}_assigned"] = self.used_headcount(ids, lvl).astype(int)
+        if level:
+            out[f"places_left_{level}"] = self.capacity_for_round(reg, level).astype(int)
+        return out
+
+    # -- rounds ------------------------------------------------------------
+
+    def commit_round(self, result: mc.AllocationResult, label: str, level: str,
+                     programmes: Sequence[str], params: dict,
+                     actor: str = "office") -> dict:
+        rows = []
+        for _, row in result.assignment.iterrows():
+            if pd.isna(row["supervisor_id"]):
+                continue
+            rows.append({
+                "student_id": str(row["student_id"]),
+                "supervisor_id": str(row["supervisor_id"]),
+                "supervisor_name": str(row["supervisor_name"]),
+                "score": float(row["score"]),
+                "below_good": bool(row["below_good"]),
+                "locked": bool(row["locked"]),
+            })
+        return self.commit_rows(rows, label, level, programmes, params, actor)
+
+    def commit_rows(self, rows: List[dict], label: str, level: str,
+                    programmes: Sequence[str], params: dict,
+                    actor: str = "office") -> dict:
+        """Commit pairings that were produced elsewhere, such as by the command line.
+
+        A draft written to disk one afternoon can then be reviewed and committed the
+        next morning without rerunning anything, which is the ordinary rhythm of an
+        office that wants a second pair of eyes before an allocation becomes real.
+        """
+        rnd = {
+            "round_id": uuid.uuid4().hex[:8],
+            "label": label,
+            "level": level,
+            "programmes": list(programmes),
+            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "params": params,
+            "rows": rows,
+        }
+        self.data.setdefault("rounds", []).append(rnd)
+        self._audit(actor, "commit_round", subject=rnd["round_id"],
+                    detail=f"{label}: {len(rows)} pairings at level {level}")
+        self.save()
+        return rnd
+
+    def rollback(self, round_id: str, actor: str = "office") -> bool:
+        before = len(self.data.get("rounds", []))
+        self.data["rounds"] = [r for r in self.data.get("rounds", [])
+                               if r["round_id"] != round_id]
+        changed = len(self.data["rounds"]) < before
+        if changed:
+            self._audit(actor, "rollback_round", subject=round_id)
+            self.save()
+        return changed
+
+    def release_students(self, student_ids: Sequence[str], actor: str = "office") -> int:
+        targets = {str(s) for s in student_ids}
+        removed = 0
+        for r in self.data.get("rounds", []):
+            keep = [row for row in r["rows"] if row["student_id"] not in targets]
+            removed += len(r["rows"]) - len(keep)
+            r["rows"] = keep
+        if removed:
+            self._audit(actor, "release_students", detail=f"{removed} pairings released")
+            self.save()
+        return removed
+
+    def release_supervisor(self, supervisor_id: str, actor: str = "office") -> List[str]:
+        """Free every student of one supervisor after illness or departure."""
+        affected = []
+        for r in self.data.get("rounds", []):
+            keep = []
+            for row in r["rows"]:
+                if str(row["supervisor_id"]) == str(supervisor_id):
+                    affected.append(row["student_id"])
+                else:
+                    keep.append(row)
+            r["rows"] = keep
+        if affected:
+            self._audit(actor, "release_supervisor", subject=str(supervisor_id),
+                        detail=f"{len(affected)} students returned to the pool")
+            self.save()
+        return affected
+
+    def rounds_summary(self) -> pd.DataFrame:
+        rows = []
+        for r in self.data.get("rounds", []):
+            scores = [x["score"] for x in r["rows"]]
+            rows.append({
+                "round_id": r["round_id"],
+                "label": r["label"],
+                "level": r.get("level", ""),
+                "programmes": ", ".join(r.get("programmes", [])) or "all",
+                "timestamp": r["timestamp"],
+                "assigned": len(r["rows"]),
+                "mean_score": round(float(np.mean(scores)), 4) if scores else None,
+                "below_good": sum(1 for x in r["rows"] if x.get("below_good")),
+            })
+        return pd.DataFrame(rows)
+
+
+# ---------------------------------------------------------------------------
+# Reserving capacity for rounds that have not run yet
+# ---------------------------------------------------------------------------
+
+def reserve_capacity(
+    remaining: np.ndarray,
+    current_students: int,
+    upcoming_students: int,
+    mode: str = "proportional",
+    floor_per_supervisor: int = 0,
+) -> np.ndarray:
+    """Decide how much of the remaining capacity this round may consume.
+
+    ``use_all`` lets the current round take everything it can, which is right
+    for the final round of a session and reckless for the first. ``proportional``
+    gives the round a share equal to its share of the students still to be
+    placed, so that the cohort allocated last still finds supervisors who work
+    on its topics. The result is always large enough in total to place the
+    current cohort, since a reservation that manufactured unassigned students
+    would be worse than the problem it solves.
+    """
+    remaining = np.asarray(remaining, dtype=float)
+    if mode == "use_all" or upcoming_students <= 0:
+        return remaining.copy()
+
+    share = current_students / max(current_students + upcoming_students, 1)
+    raw = remaining * share
+
+    allowed = np.floor(raw)
+    leftover = int(round(raw.sum() - allowed.sum()))
+    if leftover > 0:
+        order = np.argsort(-(raw - allowed))
+        for j in order[:leftover]:
+            if allowed[j] < remaining[j]:
+                allowed[j] += 1
+
+    if floor_per_supervisor:
+        allowed = np.maximum(allowed, np.minimum(remaining, floor_per_supervisor))
+
+    deficit = current_students - allowed.sum()
+    if deficit > 0:
+        order = np.argsort(-(remaining - allowed))
+        for j in order:
+            take = min(deficit, remaining[j] - allowed[j])
+            allowed[j] += take
+            deficit -= take
+            if deficit <= 0:
+                break
+    return np.minimum(allowed, remaining)
+
+
+# ---------------------------------------------------------------------------
+# What does running in sequence actually cost?
+# ---------------------------------------------------------------------------
+
+def sequencing_cost(
+    students: pd.DataFrame,
+    supervisors: pd.DataFrame,
+    score: np.ndarray,
+    params: mc.AllocationParams,
+    cohort_column: str,
+    order: Sequence[str],
+    capacity: Optional[np.ndarray] = None,
+    hard_floor: float = 0.15,
+    top_k: int = 25,
+    reservation: str = "proportional",
+) -> pd.DataFrame:
+    """Compare cohort-by-cohort allocation against a single joint allocation.
+
+    The joint solve is the benchmark: it is what the office would achieve if
+    every programme submitted on the same day. The difference is the price of
+    the calendar, and it is worth knowing before promising one programme an
+    early answer.
+    """
+    if capacity is None:
+        capacity = supervisors["workload"].astype(float).to_numpy()
+    capacity = np.asarray(capacity, dtype=float)
+
+    joint_cand = mc.build_candidates(score, hard_floor, top_k)
+    joint = mc.allocate(students, supervisors, score, joint_cand, params, capacity)
+    joint_by_cohort = (joint.assignment.assign(
+        cohort=students.set_index("student_id")[cohort_column]
+        .reindex(joint.assignment["student_id"]).values)
+        .dropna(subset=["supervisor_id"])
+        .groupby("cohort")["score"].agg(["count", "mean"]))
+
+    remaining = capacity.copy()
+    rows = []
+    for idx, cohort in enumerate(order):
+        mask = students[cohort_column].astype(str) == str(cohort)
+        sub = students[mask].reset_index(drop=True)
+        if not len(sub):
+            continue
+        upcoming = int((students[cohort_column].astype(str).isin(
+            [str(c) for c in order[idx + 1:]])).sum())
+        allowed = reserve_capacity(remaining, len(sub), upcoming, mode=reservation)
+
+        sub_score = score[np.where(mask)[0], :]
+        cand = mc.build_candidates(sub_score, hard_floor, top_k)
+        res = mc.allocate(sub, supervisors, sub_score, cand, params, allowed)
+
+        used = np.zeros(len(supervisors))
+        pos = {str(s): j for j, s in enumerate(supervisors["supervisor_id"])}
+        for sid in res.assignment["supervisor_id"].dropna():
+            used[pos[str(sid)]] += 1
+        remaining = np.maximum(remaining - used, 0)
+
+        seq_mean = res.total_score / max(res.n_assigned, 1)
+        jrow = joint_by_cohort.loc[str(cohort)] if str(cohort) in joint_by_cohort.index else None
+        rows.append({
+            "order": idx + 1,
+            "cohort": cohort,
+            "students": len(sub),
+            "sequential_assigned": res.n_assigned,
+            "sequential_mean": round(seq_mean, 4),
+            "joint_assigned": int(jrow["count"]) if jrow is not None else None,
+            "joint_mean": round(float(jrow["mean"]), 4) if jrow is not None else None,
+            "gap": round(float(jrow["mean"]) - seq_mean, 4) if jrow is not None else None,
+        })
+    return pd.DataFrame(rows)
+
+
+##### FILE: text_analysis.py #####
+
+"""
+text_analysis.py
+================
+Text analysis over dissertation titles and proposals.
+
+Three things are extracted here, all without any external model, so that the
+office can run the whole pipeline with no network access and get the same
+result every time:
+
+1. **Key phrases.** The terms that distinguish one proposal from the rest of
+   the cohort, obtained from term frequency weighted against the corpus. These
+   drive part of the match score, and, more usefully, they are shown alongside
+   each pairing as the evidence for it, so that a decision can be explained in
+   the student's own words rather than as a number.
+
+2. **Latent semantic similarity.** Term overlap alone misses a proposal that
+   says "stock levels" where the supervisor's profile says "inventory". Reducing
+   the term-document matrix to a smaller number of latent dimensions places
+   those two in nearly the same direction, because they occur in the company of
+   the same other words across the corpus, which recovers a good deal of the
+   synonymy that a plain keyword match throws away.
+
+3. **Requirements.** Whether the proposal implies primary data collection,
+   fieldwork with human participants, access to company records, or a
+   particular computational technique. These change what a supervisor needs to
+   be able to offer, and they change what the office needs to chase, most
+   obviously ethics approval, which is better discovered in February than in
+   June.
+"""
+
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass
+from typing import Dict, List, Optional, Sequence, Tuple
+
+import numpy as np
+import pandas as pd
+
+__version__ = "2.0.0"
+
+CJK_RE = re.compile(r"[\u4e00-\u9fff]")
+
+# Words that carry no signal in a dissertation proposal, over and above the
+# ordinary English stop words: nearly every submission contains them.
+DOMAIN_STOPWORDS = {
+    "dissertation", "project", "study", "research", "aim", "aims", "objective",
+    "objectives", "paper", "thesis", "chapter", "literature", "review",
+    "analysis", "analyse", "analyze", "investigate", "investigates",
+    "investigating", "examine", "examines", "examining", "explore", "explores",
+    "exploring", "understand", "understanding", "data", "using", "use", "used",
+    "based", "approach", "method", "methods", "methodology", "results",
+    "findings", "contribution", "student", "university", "business", "topic",
+    "will", "would", "also", "within", "across", "towards", "well",
+}
+
+REQUIREMENT_PATTERNS: Dict[str, List[str]] = {
+    "primary data collection": [
+        r"\bprimary data\b", r"\bcollect(?:ing|ed)? (?:my |our )?own data\b",
+        r"\bfieldwork\b", r"\bquestionnaire\b", r"\bsurvey (?:of|among|with)\b",
+        r"\binterview(?:s|ing)?\b", r"\bfocus group\b",
+    ],
+    "human participants": [
+        r"\bparticipants?\b", r"\brespondents?\b", r"\bvolunteers?\b",
+        r"\binterviewees?\b", r"\bconsent\b",
+    ],
+    "company or partner access": [
+        r"\bcompany data\b", r"\bindustry partner\b", r"\bplacement\b",
+        r"\bmy employer\b", r"\binternal (?:records|data)\b",
+        r"\bcase (?:company|organisation|organization)\b",
+    ],
+    "restricted or paid data": [
+        r"\bbloomberg\b", r"\brefinitiv\b", r"\bdatastream\b", r"\bcompustat\b",
+        r"\bwrds\b", r"\bnielsen\b", r"\bproprietary (?:data|dataset)\b",
+    ],
+    "computational workload": [
+        r"\bsimulation\b", r"\bagent[- ]based\b", r"\boptimisation\b", r"\boptimization\b",
+        r"\bmachine learning\b", r"\bneural\b", r"\bdeep learning\b",
+        r"\blarge language model\b", r"\bweb scraping\b", r"\bscrap(?:e|ing)\b",
+    ],
+    "secondary data only": [
+        r"\bsecondary data\b", r"\bpublicly available\b", r"\bpublished (?:accounts|reports)\b",
+        r"\bopen data\b", r"\bdatabase of\b",
+    ],
+}
+
+ETHICS_TRIGGERS = {"primary data collection", "human participants"}
+
+
+# ---------------------------------------------------------------------------
+# Vectorisation shared by the phrase and similarity routines
+# ---------------------------------------------------------------------------
+
+@dataclass
+class TextModel:
+    """Fitted vectoriser plus the reduced space, if one could be built."""
+    vectorizer: object
+    matrix: object
+    terms: np.ndarray
+    reduced: Optional[np.ndarray] = None
+    n_students: int = 0
+
+
+def _is_cjk(corpus: Sequence[str]) -> bool:
+    joined = " ".join(corpus)
+    return len(CJK_RE.findall(joined)) / max(len(joined), 1) > 0.05
+
+
+def fit_text_model(student_texts: Sequence[str], supervisor_texts: Sequence[str],
+                   n_components: int = 120) -> Optional[TextModel]:
+    """Fit a TF-IDF model over both sides and reduce it for semantic comparison."""
+    try:
+        from sklearn.feature_extraction.text import TfidfVectorizer
+        from sklearn.decomposition import TruncatedSVD
+        from sklearn.preprocessing import normalize
+    except ImportError:
+        return None
+
+    corpus = list(student_texts) + list(supervisor_texts)
+    if not any(t.strip() for t in corpus):
+        return None
+
+    if _is_cjk(corpus):
+        vec = TfidfVectorizer(analyzer="char_wb", ngram_range=(2, 3), min_df=1,
+                              sublinear_tf=True)
+    else:
+        stop = list(set(TfidfVectorizer(stop_words="english").get_stop_words())
+                    | DOMAIN_STOPWORDS)
+        vec = TfidfVectorizer(analyzer="word", ngram_range=(1, 3), min_df=2,
+                              max_df=0.6, stop_words=stop, sublinear_tf=True)
+    try:
+        matrix = vec.fit_transform(corpus)
+    except ValueError:
+        return None
+    if matrix.shape[1] == 0:
+        return None
+
+    reduced = None
+    k = min(n_components, matrix.shape[1] - 1, matrix.shape[0] - 1)
+    if k >= 2:
+        try:
+            svd = TruncatedSVD(n_components=k, random_state=0)
+            reduced = normalize(svd.fit_transform(matrix))
+        except Exception:
+            reduced = None
+
+    return TextModel(vectorizer=vec, matrix=matrix,
+                     terms=np.asarray(vec.get_feature_names_out()),
+                     reduced=reduced, n_students=len(student_texts))
+
+
+def similarity_matrices(model: TextModel) -> Tuple[np.ndarray, np.ndarray]:
+    """Return the surface and the latent similarity between students and supervisors."""
+    ns = model.n_students
+    surface = (model.matrix[:ns] @ model.matrix[ns:].T).toarray()
+    surface = np.clip(surface, 0.0, 1.0)
+    if model.reduced is not None:
+        latent = np.clip(model.reduced[:ns] @ model.reduced[ns:].T, 0.0, 1.0)
+    else:
+        latent = surface
+    return surface, latent
+
+
+def key_phrases(model: TextModel, top_n: int = 8) -> List[List[str]]:
+    """The most distinctive terms of each student proposal.
+
+    Multi-word phrases are preferred over the single words they contain, since
+    "inventory management" tells the office something that "inventory" and
+    "management" separately do not, and a phrase that is wholly contained in a
+    longer retained phrase is dropped to keep the evidence readable.
+    """
+    out: List[List[str]] = []
+    ns = model.n_students
+    sub = model.matrix[:ns]
+    for i in range(ns):
+        row = sub.getrow(i)
+        if row.nnz == 0:
+            out.append([])
+            continue
+        idx = row.indices[np.argsort(-row.data)]
+        ranked = [str(model.terms[j]) for j in idx[: top_n * 4]]
+        kept: List[str] = []
+        for phrase in ranked:
+            if any(phrase != other and phrase in other for other in ranked[:top_n * 2]):
+                continue
+            if any(phrase in k or k in phrase for k in kept):
+                continue
+            kept.append(phrase)
+            if len(kept) >= top_n:
+                break
+        out.append(kept)
+    return out
+
+
+def phrase_overlap(student_phrases: Sequence[Sequence[str]],
+                   supervisor_texts: Sequence[str]) -> Tuple[np.ndarray, List[List[List[str]]]]:
+    """Share of each student's key phrases that appear in a supervisor's profile.
+
+    Returns both the score and, for every pair, the phrases that actually
+    matched, which is what the office shows a student who asks why.
+    """
+    prepared = [" " + re.sub(r"\s+", " ", t.lower()) + " " for t in supervisor_texts]
+    n, m = len(student_phrases), len(prepared)
+    scores = np.zeros((n, m))
+    evidence: List[List[List[str]]] = [[[] for _ in range(m)] for _ in range(n)]
+    for i, phrases in enumerate(student_phrases):
+        if not phrases:
+            continue
+        weights = np.array([1.0 / (1 + 0.25 * r) for r in range(len(phrases))])
+        weights = weights / weights.sum()
+        for j, text in enumerate(prepared):
+            hit = 0.0
+            for r, phrase in enumerate(phrases):
+                if f" {phrase} " in text or phrase in text:
+                    hit += weights[r]
+                    evidence[i][j].append(phrase)
+            scores[i, j] = min(hit, 1.0)
+    return scores, evidence
+
+
+# ---------------------------------------------------------------------------
+# Requirements implied by a proposal
+# ---------------------------------------------------------------------------
+
+def detect_requirements(text: str) -> List[str]:
+    found = []
+    lowered = " " + str(text).lower() + " "
+    for label, patterns in REQUIREMENT_PATTERNS.items():
+        if any(re.search(p, lowered) for p in patterns):
+            found.append(label)
+    return found
+
+
+def requirements_table(students: pd.DataFrame,
+                       text_columns: Sequence[str] = ("project_title", "abstract")) -> pd.DataFrame:
+    """Flag what each proposal will need, and what the office will have to chase."""
+    rows = []
+    for _, row in students.iterrows():
+        text = " ".join(str(row.get(c, "")) for c in text_columns)
+        flags = detect_requirements(text)
+        rows.append({
+            "student_id": row.get("student_id"),
+            "requirements": "; ".join(flags),
+            "ethics_review_likely": bool(ETHICS_TRIGGERS & set(flags)),
+            "needs_data_access_check": "restricted or paid data" in flags
+                                       or "company or partner access" in flags,
+            "word_count": len(re.findall(r"\w+", text)),
+        })
+    return pd.DataFrame(rows)
+
+
+##### FILE: report.py #####
+
+"""
+report.py
+=========
+Turns a finished allocation into something a teaching operations office can
+actually use: an HTML page that opens by double-clicking it, an Excel workbook
+with one sheet per question they will ask, and the plain CSVs underneath for
+anyone who wants the raw rows.
+
+The page is deliberately not a dashboard. The office does not need a chart of
+the score distribution; it needs to know which students still have nobody,
+which pairings somebody should look at before the list goes out, and where a
+given student ended up. So the page opens with what has to be done, puts the
+numbers underneath that, and gives the full list a search box, because "find
+me s2400312" is the single commonest thing anybody will do with it.
+
+Colour carries status and nothing else. Amber means a human should look, slate
+means settled, and a red left rule means nobody was found. Nothing on the page
+is coloured for decoration.
+
+No network access is needed to open the report, no fonts are fetched, and no
+JavaScript library is loaded. It is one file that works from a memory stick in
+ten years' time.
+"""
+
+from __future__ import annotations
+
+import html
+import json
+import time
+from pathlib import Path
+from typing import Dict, List, Optional
+
+import numpy as np
+import pandas as pd
+
+__version__ = "2.0.0"
+
+# --- design tokens ---------------------------------------------------------
+# Ink is a deep slate rather than a tinted black; the two status colours are the
+# only saturated things on the page and both of them mean something.
+INK = "#16202B"
+INK_SOFT = "#5A6675"
+RULE = "#D8DEE6"
+PAPER = "#FFFFFF"
+SHADE = "#F4F6F8"
+ATTENTION = "#B26B00"      # a person should look at this
+SETTLED = "#0F6B63"        # nothing to do
+MISSING = "#A3322B"        # nobody was found
+
+
+# ---------------------------------------------------------------------------
+# HTML report
+# ---------------------------------------------------------------------------
+
+def _esc(value) -> str:
+    if value is None or (isinstance(value, float) and np.isnan(value)):
+        return ""
+    return html.escape(str(value))
+
+
+def _stat(value, label: str, tone: str = "") -> str:
+    cls = f" class=\"{tone}\"" if tone else ""
+    return (f'<div class="stat"><span class="stat-value"{cls}>{_esc(value)}</span>'
+            f'<span class="stat-label">{_esc(label)}</span></div>')
+
+
+def _rows(df: pd.DataFrame, columns: List[str], row_class=None) -> str:
+    out = []
+    for _, row in df.iterrows():
+        cls = row_class(row) if row_class else ""
+        cells = "".join(f"<td>{_esc(row.get(c, ''))}</td>" for c in columns)
+        out.append(f'<tr class="{cls}">{cells}</tr>')
+    return "\n".join(out)
+
+
+CSS = f"""
+:root {{
+  --ink: {INK}; --ink-soft: {INK_SOFT}; --rule: {RULE};
+  --paper: {PAPER}; --shade: {SHADE};
+  --attention: {ATTENTION}; --settled: {SETTLED}; --missing: {MISSING};
+}}
+* {{ box-sizing: border-box; }}
+body {{
+  margin: 0; background: var(--paper); color: var(--ink);
+  font-family: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
+  font-size: 17px; line-height: 1.55;
+}}
+.wrap {{ max-width: 1180px; margin: 0 auto; padding: 48px 32px 96px; }}
+p, li {{ max-width: 68ch; }}
+
+header.masthead {{ border-bottom: 2px solid var(--ink); padding-bottom: 18px; }}
+.masthead h1 {{ font-size: 34px; line-height: 1.15; margin: 0 0 6px; font-weight: 600; }}
+.masthead .meta {{ color: var(--ink-soft); font-size: 15px; margin: 0; }}
+.masthead .meta span {{ margin-right: 22px; }}
+
+h2 {{ font-size: 23px; margin: 52px 0 6px; font-weight: 600; }}
+h2 + p.lede {{ margin: 0 0 18px; color: var(--ink-soft); }}
+
+.todo {{ border-left: 3px solid var(--attention); padding: 2px 0 2px 20px; margin: 28px 0 8px; }}
+.todo.none {{ border-left-color: var(--settled); }}
+.todo h2 {{ margin-top: 0; }}
+.todo ul {{ margin: 10px 0 0; padding-left: 20px; }}
+.todo li {{ margin-bottom: 8px; }}
+.todo a {{ color: var(--ink); text-decoration-color: var(--rule); }}
+
+.stats {{ margin: 22px 0 4px; padding: 18px 0;
+         border-top: 1px solid var(--rule); border-bottom: 1px solid var(--rule); }}
+.stat {{ display: inline-block; vertical-align: top; margin-right: 46px; }}
+.stat-value, .stat-label {{ display: block; }}
+.stat-value {{ font-size: 30px; font-weight: 600; font-variant-numeric: tabular-nums; }}
+.stat-value.attention {{ color: var(--attention); }}
+.stat-value.missing {{ color: var(--missing); }}
+.stat-label {{ font-size: 14px; color: var(--ink-soft); }}
+
+table {{ width: 100%; border-collapse: collapse; margin-top: 14px;
+        font-family: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+        font-size: 14.5px; }}
+th {{ text-align: left; font-weight: 600; border-bottom: 1.5px solid var(--ink);
+     padding: 8px 10px; white-space: nowrap; }}
+td {{ padding: 7px 10px; border-bottom: 1px solid var(--rule); vertical-align: top; }}
+tbody tr:hover {{ background: var(--shade); }}
+td:nth-child(n+3) {{ font-variant-numeric: tabular-nums; }}
+tr.flag td:first-child {{ box-shadow: inset 3px 0 0 var(--attention); }}
+tr.gap td:first-child {{ box-shadow: inset 3px 0 0 var(--missing); }}
+.scroll {{ overflow-x: auto; }}
+
+.chip {{ display: inline-block; padding: 1px 8px; border-radius: 3px; font-size: 12.5px;
+        border: 1px solid var(--rule); color: var(--ink-soft); white-space: nowrap; }}
+.chip.flag {{ color: var(--attention); border-color: var(--attention); }}
+.chip.gap {{ color: var(--missing); border-color: var(--missing); }}
+
+.search {{ margin: 18px 0 0; display: flex; gap: 12px; align-items: center; }}
+.search input {{ font: inherit; font-size: 15px; padding: 8px 12px; width: 320px;
+                border: 1px solid var(--rule); border-radius: 3px; background: var(--paper);
+                color: var(--ink); }}
+.search input:focus {{ outline: 2px solid var(--ink); outline-offset: 1px; }}
+.search .count {{ color: var(--ink-soft); font-size: 14px; }}
+
+footer {{ margin-top: 64px; padding-top: 16px; border-top: 1px solid var(--rule);
+         color: var(--ink-soft); font-size: 14px; }}
+
+@media (max-width: 760px) {{
+  .wrap {{ padding: 28px 18px 64px; }}
+  .masthead h1 {{ font-size: 27px; }}
+  .stats {{ gap: 24px; }}
+}}
+@media print {{
+  .search {{ display: none; }}
+  body {{ font-size: 11pt; }}
+  .wrap {{ max-width: none; padding: 0; }}
+  tr {{ break-inside: avoid; }}
+  h2 {{ break-after: avoid; }}
+}}
+"""
+
+SEARCH_JS = """
+(function () {
+  var box = document.getElementById('find');
+  var count = document.getElementById('found');
+  var rows = Array.prototype.slice.call(
+    document.querySelectorAll('#allocation tbody tr'));
+  if (!box) return;
+  function apply() {
+    var q = box.value.trim().toLowerCase();
+    var shown = 0;
+    rows.forEach(function (tr) {
+      var hit = !q || tr.textContent.toLowerCase().indexOf(q) !== -1;
+      tr.style.display = hit ? '' : 'none';
+      if (hit) shown++;
+    });
+    count.textContent = q ? shown + ' of ' + rows.length + ' shown' : rows.length + ' pairings';
+  }
+  box.addEventListener('input', apply);
+  apply();
+})();
+"""
+
+
+def build_html(result, students: pd.DataFrame, register: pd.DataFrame,
+               diagnostics: pd.DataFrame, requirements: pd.DataFrame,
+               scope: dict, session: str, register_version: int,
+               params: dict) -> str:
+    assignment = result.assignment.copy()
+    assigned = assignment.dropna(subset=["supervisor_id"]).copy()
+    unassigned = assignment[assignment["supervisor_id"].isna()].copy()
+    titles = students.set_index("student_id")["project_title"].astype(str)
+
+    assigned["score"] = assigned["score"].astype(float).round(3)
+    weakest = assigned[assigned["below_good"]].sort_values("score")
+
+    loads = result.loads.copy()
+    full = loads[loads["spare"] <= 0]
+    unused = loads[(loads["assigned"] == 0) & (loads["workload"] > 0)]
+
+    ethics = int(requirements["ethics_review_likely"].sum()) if len(requirements) else 0
+    access = int(requirements["needs_data_access_check"].sum()) if len(requirements) else 0
+
+    todo: List[str] = []
+    if len(unassigned):
+        todo.append(f"<strong>{len(unassigned)} students have no supervisor.</strong> "
+                    "No member of staff cleared the minimum standard of fit, which in "
+                    "practice nearly always means the proposal is too vague to place. "
+                    "They are listed under Students still without a supervisor; the usual "
+                    "next step is to ask them for a clearer topic and run the round again.")
+    if len(weakest):
+        todo.append(f"<strong>{len(weakest)} pairings are worth a second look.</strong> "
+                    "These sit below the standard the office set for a good match but were "
+                    "allocated anyway, within the tolerance. Each row says what the two "
+                    "have in common, so a quick read is usually enough to accept or move it.")
+    if ethics:
+        todo.append(f"<strong>{ethics} proposals look like they need ethics approval.</strong> "
+                    "They mention collecting data from people directly. Better to start that "
+                    "now than in the last month of the project.")
+    if access:
+        todo.append(f"<strong>{access} proposals depend on data the student may not have.</strong> "
+                    "They name a paid database or access to a company, which is worth "
+                    "confirming before the work gets under way.")
+    if len(unused):
+        todo.append(f"<strong>{len(unused)} supervisors took nobody in this round.</strong> "
+                    "That is expected when their areas are unlike the topics submitted, but "
+                    "it is worth a glance in case somebody's record is out of date.")
+    if not todo:
+        todo.append("Nothing needs a decision. Every student has a supervisor, every pairing "
+                    "met the standard, and no proposal raised a flag.")
+
+    programmes = ", ".join(scope.get("programmes") or []) or "all programmes"
+    mean = result.total_score / max(result.n_assigned, 1)
+
+    alloc_view = assigned.assign(
+        project=assigned["student_id"].map(titles).fillna(""),
+        status=np.where(assigned["below_good"], "second look", "settled"),
+    )[["student_id", "project", "supervisor_name", "group", "score", "status", "evidence"]]
+
+    unassigned_view = unassigned.assign(
+        project=unassigned["student_id"].map(titles).fillna(""))[["student_id", "project"]]
+
+    weak_view = weakest.assign(
+        project=weakest["student_id"].map(titles).fillna("")
+    )[["student_id", "project", "supervisor_name", "score", "evidence"]]
+
+    by_sup = (assigned.groupby(["supervisor_name", "group"])
+              .agg(students=("student_id", "count"),
+                   mean_score=("score", "mean"),
+                   second_look=("below_good", "sum"))
+              .reset_index().sort_values(["group", "supervisor_name"]))
+    by_sup["mean_score"] = by_sup["mean_score"].round(3)
+
+    parts = [f"""<!doctype html>
+<html lang="en-GB"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Allocation, {_esc(scope.get('level', ''))}, {_esc(session)}</title>
+<style>{CSS}</style></head><body><div class="wrap">
+
+<header class="masthead">
+  <h1>Dissertation allocation, {_esc(scope.get('level', ''))}</h1>
+  <p class="meta">
+    <span>Session {_esc(session)}</span>
+    <span>{_esc(programmes)}</span>
+    <span>Produced {time.strftime('%d %B %Y at %H:%M')}</span>
+    <span>Register version {_esc(register_version)}</span>
+  </p>
+</header>
+
+<div class="todo{'' if len(todo) > 1 or len(unassigned) or len(weakest) else ' none'}">
+<h2>What needs doing</h2>
+<ul>{''.join(f'<li>{t}</li>' for t in todo)}</ul>
+</div>
+
+<div class="stats">
+  {_stat(result.n_assigned, 'students placed')}
+  {_stat(len(unassigned), 'without a supervisor', 'missing' if len(unassigned) else '')}
+  {_stat(len(weakest), 'for a second look', 'attention' if len(weakest) else '')}
+  {_stat(f'{mean:.2f}', 'average strength of match')}
+  {_stat(assigned['supervisor_id'].nunique(), 'supervisors used')}
+</div>
+"""]
+
+    if len(unassigned_view):
+        parts.append(f"""
+<h2>Students still without a supervisor</h2>
+<p class="lede">Nobody in the register was a close enough fit to allocate automatically.</p>
+<div class="scroll"><table>
+<thead><tr><th>Student</th><th>Project</th></tr></thead>
+<tbody>{_rows(unassigned_view, ['student_id', 'project'], lambda r: 'gap')}</tbody>
+</table></div>
+""")
+
+    if len(weak_view):
+        parts.append(f"""
+<h2>Pairings worth a second look</h2>
+<p class="lede">Allocated within the tolerance the office set, but below the standard for a
+good match. What the two have in common is given in the last column.</p>
+<div class="scroll"><table>
+<thead><tr><th>Student</th><th>Project</th><th>Supervisor</th><th>Match</th>
+<th>What they have in common</th></tr></thead>
+<tbody>{_rows(weak_view, ['student_id', 'project', 'supervisor_name', 'score', 'evidence'],
+              lambda r: 'flag')}</tbody>
+</table></div>
+""")
+
+    parts.append(f"""
+<h2>Everyone, in one list</h2>
+<p class="lede">Type a name, a student number or a topic to filter the list.</p>
+<div class="search">
+  <label for="find" class="visually-hidden"></label>
+  <input id="find" type="search" placeholder="Find a student or a supervisor"
+         aria-label="Find a student or a supervisor">
+  <span class="count" id="found"></span>
+</div>
+<div class="scroll"><table id="allocation">
+<thead><tr><th>Student</th><th>Project</th><th>Supervisor</th><th>Group</th>
+<th>Match</th><th>Status</th><th>What they have in common</th></tr></thead>
+<tbody>{_rows(alloc_view,
+              ['student_id', 'project', 'supervisor_name', 'group', 'score', 'status', 'evidence'],
+              lambda r: 'flag' if r['status'] == 'second look' else '')}</tbody>
+</table></div>
+
+<h2>Load by supervisor</h2>
+<p class="lede">Counted for this round only. Remaining capacity across the whole session is in
+the workbook and in the register.</p>
+<div class="scroll"><table>
+<thead><tr><th>Supervisor</th><th>Group</th><th>Students</th><th>Average match</th>
+<th>For a second look</th></tr></thead>
+<tbody>{_rows(by_sup, ['supervisor_name', 'group', 'students', 'mean_score', 'second_look'],
+              lambda r: 'flag' if r['second_look'] else '')}</tbody>
+</table></div>
+
+<h2>How this allocation was produced</h2>
+<p>Every student was matched against every available supervisor on research area, method,
+the wording of the proposal and the phrases that distinguish it. The allocation itself
+maximises the total strength of match subject to the capacity each supervisor agreed to,
+so it is not first-come-first-served and it does not depend on the order the students
+applied in. Running it again on the same inputs gives the same answer.</p>
+<div class="scroll"><table>
+<thead><tr><th>Setting</th><th>Value</th><th>What it means</th></tr></thead>
+<tbody>
+<tr><td>Minimum standard of fit</td><td>{_esc(params.get('hard_floor'))}</td>
+<td>Below this, a pairing was never considered at all</td></tr>
+<tr><td>Standard for a good match</td><td>{_esc(params.get('good_threshold'))}</td>
+<td>At or above this, a pairing needs no further thought</td></tr>
+<tr><td>Tolerance</td><td>{_esc(params.get('tolerance'))}</td>
+<td>The share of pairings allowed to fall below that standard</td></tr>
+<tr><td>Capacity reserved for later rounds</td><td>{_esc(params.get('reservation'))}</td>
+<td>How much was held back for cohorts not yet allocated</td></tr>
+<tr><td>Solver</td><td>{_esc(result.engine)}</td>
+<td>Finished in {result.solve_seconds:.2f} seconds</td></tr>
+</tbody></table></div>
+
+<footer>
+Produced by the dissertation allocation tool, version {__version__}. This page is a single
+file and needs nothing installed to open it. Alongside it you will find the same information
+as a spreadsheet, and the underlying rows as CSV.
+</footer>
+
+</div><script>{SEARCH_JS}</script></body></html>
+""")
+    return "".join(parts)
+
+
+# ---------------------------------------------------------------------------
+# Excel workbook
+# ---------------------------------------------------------------------------
+
+def build_workbook(path: Path, result, students: pd.DataFrame, register: pd.DataFrame,
+                   diagnostics: pd.DataFrame, requirements: pd.DataFrame,
+                   capacity_table: Optional[pd.DataFrame], scope: dict,
+                   session: str, params: dict) -> None:
+    """One sheet per question the office actually asks.
+
+    The summary sheet counts with formulas rather than with numbers typed in by
+    the script, so that if somebody swaps a supervisor by hand on the Allocation
+    sheet, which they will, the totals follow them instead of quietly becoming
+    wrong. Excel recalculates these when the file is opened.
+    """
+    from openpyxl import Workbook
+    from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+    from openpyxl.utils import get_column_letter
+
+    head_font = Font(name="Arial", size=11, bold=True, color="FFFFFF")
+    head_fill = PatternFill("solid", fgColor="16202B")
+    body_font = Font(name="Arial", size=10)
+    title_font = Font(name="Arial", size=14, bold=True)
+    note_font = Font(name="Arial", size=9, italic=True, color="5A6675")
+    flag_fill = PatternFill("solid", fgColor="FDF1DC")
+    gap_fill = PatternFill("solid", fgColor="FBE6E4")
+    thin = Side(style="thin", color="D8DEE6")
+    border = Border(bottom=thin)
+
+    wb = Workbook()
+    titles = students.set_index("student_id")["project_title"].astype(str)
+    assignment = result.assignment.copy()
+    assigned = assignment.dropna(subset=["supervisor_id"]).copy()
+    assigned["project_title"] = assigned["student_id"].map(titles).fillna("")
+    assigned["status"] = np.where(assigned["below_good"], "second look", "settled")
+    unassigned = assignment[assignment["supervisor_id"].isna()].copy()
+    unassigned["project_title"] = unassigned["student_id"].map(titles).fillna("")
+
+    def write_sheet(ws, df: pd.DataFrame, columns: List[str], widths: List[int],
+                    highlight=None) -> None:
+        for c, name in enumerate(columns, start=1):
+            cell = ws.cell(row=1, column=c, value=name.replace("_", " ").capitalize())
+            cell.font = head_font
+            cell.fill = head_fill
+            cell.alignment = Alignment(vertical="center")
+            ws.column_dimensions[get_column_letter(c)].width = widths[c - 1]
+        for r, (_, row) in enumerate(df.iterrows(), start=2):
+            fill = highlight(row) if highlight else None
+            for c, name in enumerate(columns, start=1):
+                value = row.get(name, "")
+                if isinstance(value, (np.integer,)):
+                    value = int(value)
+                elif isinstance(value, (np.floating,)):
+                    value = round(float(value), 4)
+                elif isinstance(value, (np.bool_, bool)):
+                    value = bool(value)
+                cell = ws.cell(row=r, column=c, value=value)
+                cell.font = body_font
+                cell.border = border
+                cell.alignment = Alignment(vertical="top", wrap_text=(widths[c - 1] > 40))
+                if fill:
+                    cell.fill = fill
+        ws.freeze_panes = "A2"
+        if len(df):
+            ws.auto_filter.ref = f"A1:{get_column_letter(len(columns))}{len(df) + 1}"
+
+    # --- Allocation -------------------------------------------------------
+    ws_alloc = wb.active
+    ws_alloc.title = "Allocation"
+    alloc_cols = ["student_id", "project_title", "supervisor_id", "supervisor_name", "group",
+                  "score", "status", "evidence"]
+    write_sheet(ws_alloc, assigned[alloc_cols], alloc_cols, [14, 44, 14, 22, 26, 9, 13, 50],
+                highlight=lambda r: flag_fill if r["status"] == "second look" else None)
+    n_alloc = len(assigned)
+
+    # --- Summary, counted from the Allocation sheet ------------------------
+    ws_sum = wb.create_sheet("Summary", 0)
+    ws_sum["A1"] = f"Dissertation allocation, {scope.get('level', '')}, session {session}"
+    ws_sum["A1"].font = title_font
+    ws_sum["A2"] = (f"{', '.join(scope.get('programmes') or []) or 'all programmes'} · "
+                    f"produced {time.strftime('%d %B %Y at %H:%M')}")
+    ws_sum["A2"].font = note_font
+    ws_sum["A4"] = ("The figures below count the Allocation sheet, so if you move a student "
+                    "to a different supervisor there, they update when you reopen the file.")
+    ws_sum["A4"].font = note_font
+
+    last = max(n_alloc + 1, 2)
+    rows = [
+        ("Students placed", f"=COUNTA(Allocation!A2:A{last})"),
+        ("Students without a supervisor", len(unassigned)),
+        ("Pairings for a second look",
+         f'=COUNTIF(Allocation!G2:G{last},"second look")'),
+        ("Average strength of match", f"=IFERROR(AVERAGE(Allocation!F2:F{last}),0)"),
+        ("Weakest match allocated", f"=IFERROR(MIN(Allocation!F2:F{last}),0)"),
+        # distinct supervisors, counted on the identifier rather than the name,
+        # because two members of staff can share a name and one of them would
+        # otherwise disappear from the count
+        ("Supervisors used", f"=SUMPRODUCT(1/COUNTIF(Allocation!C2:C{last},"
+                             f"Allocation!C2:C{last}))"),
+    ]
+    for i, (label, value) in enumerate(rows, start=6):
+        ws_sum.cell(row=i, column=1, value=label).font = Font(name="Arial", size=10, bold=True)
+        cell = ws_sum.cell(row=i, column=2, value=value)
+        cell.font = body_font
+        if "Average" in label or "Weakest" in label:
+            cell.number_format = "0.000"
+
+    ws_sum.cell(row=13, column=1, value="Settings used").font = Font(name="Arial", size=11,
+                                                                    bold=True)
+    explain = {
+        "hard_floor": "Below this, a pairing was never considered",
+        "good_threshold": "At or above this, a pairing needs no further thought",
+        "tolerance": "Share of pairings allowed below that standard",
+        "reservation": "How much capacity was held back for later rounds",
+        "engine": "Which solver produced the result",
+        "register_version": "Version of the supervisor register used",
+    }
+    r = 14
+    for key, note in explain.items():
+        if key in params:
+            ws_sum.cell(row=r, column=1, value=key.replace("_", " ")).font = body_font
+            ws_sum.cell(row=r, column=2, value=params[key]).font = body_font
+            ws_sum.cell(row=r, column=3, value=note).font = note_font
+            r += 1
+    for col, width in zip("ABC", (34, 18, 58)):
+        ws_sum.column_dimensions[col].width = width
+
+    # --- Without a supervisor ---------------------------------------------
+    if len(unassigned):
+        ws = wb.create_sheet("Without a supervisor")
+        cols = ["student_id", "project_title"]
+        write_sheet(ws, unassigned[cols], cols, [14, 70], highlight=lambda r: gap_fill)
+        ws.cell(row=len(unassigned) + 3, column=1,
+                value=("Nobody cleared the minimum standard of fit for these students, which "
+                       "usually means the proposal is too vague to place rather than that "
+                       "capacity ran out.")).font = note_font
+
+    # --- By supervisor -----------------------------------------------------
+    ws = wb.create_sheet("By supervisor")
+    by_sup = (assigned.groupby(["supervisor_id", "supervisor_name", "group"])
+              .agg(students=("student_id", "count"), mean_score=("score", "mean"),
+                   second_look=("below_good", "sum")).reset_index())
+    by_sup["mean_score"] = by_sup["mean_score"].round(3)
+    if capacity_table is not None and len(capacity_table):
+        keep = [c for c in ("supervisor_id", "allowance_units", "units_used", "units_left")
+                if c in capacity_table.columns]
+        by_sup = by_sup.merge(capacity_table[keep], on="supervisor_id", how="left")
+    cols = [c for c in ["supervisor_name", "group", "students", "mean_score", "second_look",
+                        "allowance_units", "units_used", "units_left"] if c in by_sup.columns]
+    write_sheet(ws, by_sup.sort_values(["group", "supervisor_name"]), cols,
+                [24, 28, 10, 12, 13, 14, 12, 12],
+                highlight=lambda r: flag_fill if r.get("second_look") else None)
+
+    # --- Second look --------------------------------------------------------
+    weak = assigned[assigned["below_good"]].sort_values("score")
+    if len(weak):
+        ws = wb.create_sheet("Second look")
+        cols = ["student_id", "project_title", "supervisor_name", "score", "evidence"]
+        write_sheet(ws, weak[cols], cols, [14, 44, 22, 9, 56], highlight=lambda r: flag_fill)
+
+    # --- Requirements -------------------------------------------------------
+    if len(requirements):
+        ws = wb.create_sheet("Ethics and data")
+        flagged = requirements[(requirements["requirements"] != "")]
+        cols = ["student_id", "requirements", "ethics_review_likely",
+                "needs_data_access_check", "word_count"]
+        write_sheet(ws, flagged[cols], cols, [14, 46, 18, 20, 12],
+                    highlight=lambda r: flag_fill if r["ethics_review_likely"] else None)
+
+    # --- Queries ------------------------------------------------------------
+    if len(diagnostics):
+        ws = wb.create_sheet("If a student asks")
+        cols = [c for c in diagnostics.columns]
+        write_sheet(ws, diagnostics, cols, [14, 22, 12, 22, 12, 14])
+        ws.cell(row=len(diagnostics) + 3, column=1,
+                value=("Blocking means a better-suited supervisor was already full. Wasteful "
+                       "means one still had room, which happens when a minimum load or a group "
+                       "ceiling applies. Both are normal, and both have an answer.")
+                ).font = note_font
+
+    wb.save(path)
+
+
+# ---------------------------------------------------------------------------
+# The whole pack
+# ---------------------------------------------------------------------------
+
+def build_pack(outdir: Path, result, students: pd.DataFrame, register: pd.DataFrame,
+               diagnostics: pd.DataFrame, requirements: pd.DataFrame,
+               capacity_table: Optional[pd.DataFrame], scope: dict, session: str,
+               register_version: int, params: dict) -> Dict[str, Path]:
+    outdir = Path(outdir)
+    outdir.mkdir(parents=True, exist_ok=True)
+    written: Dict[str, Path] = {}
+
+    written["report"] = outdir / "report.html"
+    written["report"].write_text(
+        build_html(result, students, register, diagnostics, requirements, scope,
+                   session, register_version, params), encoding="utf-8")
+
+    written["workbook"] = outdir / "allocation.xlsx"
+    build_workbook(written["workbook"], result, students, register, diagnostics,
+                   requirements, capacity_table, scope, session, params)
+
+    result.assignment.to_csv(outdir / "allocation.csv", index=False, encoding="utf-8-sig")
+    result.loads.to_csv(outdir / "supervisor_loads.csv", index=False, encoding="utf-8-sig")
+    written["allocation_csv"] = outdir / "allocation.csv"
+    if len(diagnostics):
+        diagnostics.to_csv(outdir / "query_diagnostics.csv", index=False, encoding="utf-8-sig")
+    if len(requirements):
+        requirements.to_csv(outdir / "requirements.csv", index=False, encoding="utf-8-sig")
+
+    rows = [{
+        "student_id": str(r["student_id"]),
+        "supervisor_id": str(r["supervisor_id"]),
+        "supervisor_name": str(r["supervisor_name"]),
+        "score": float(r["score"]),
+        "below_good": bool(r["below_good"]),
+        "locked": bool(r["locked"]),
+    } for _, r in result.assignment.iterrows() if pd.notna(r["supervisor_id"])]
+    written["draft"] = outdir / "draft.json"
+    written["draft"].write_text(json.dumps({
+        "session": session,
+        "label": f"{scope.get('level', '')} · "
+                 f"{', '.join(scope.get('programmes') or []) or 'all'} · {len(rows)} students",
+        "level": scope.get("level", ""),
+        "programmes": scope.get("programmes") or [],
+        "params": params,
+        "produced_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "rows": rows,
+    }, ensure_ascii=False, indent=2), encoding="utf-8")
+    return written
+
+
+##### FILE: benchmark.py #####
+
+"""Benchmark the two engines at realistic and pessimistic sizes."""
+import time
+import numpy as np
+import pandas as pd
+import matching_core as mc
+
+rng = np.random.default_rng(7)
+AREAS = [f"area{i}" for i in range(15)]
+METHODS = [f"method{i}" for i in range(10)]
+
+
+def synth(n, m):
+    sup = pd.DataFrame([{
+        "supervisor_id": f"S{j:04d}", "name": f"Supervisor {j}", "group": f"group{j % 6}",
+        "research_areas": ";".join(rng.choice(AREAS, size=3, replace=False)),
+        "methods": ";".join(rng.choice(METHODS, size=3, replace=False)),
+        "keywords": "empirical UK firms panel", "workload": 0, "min_load": 0,
+    } for j in range(m)])
+    sup["workload"] = int(np.ceil(n / m)) + 2
+    stu = pd.DataFrame([{
+        "student_id": f"s{i:05d}",
+        "project_title": f"A study of {rng.choice(AREAS)} using {rng.choice(METHODS)}",
+        "abstract": "This project examines a business question with firm level data.",
+        "areas": str(rng.choice(AREAS)), "methods": str(rng.choice(METHODS)),
+    } for i in range(n)])
+    return stu, sup
+
+
+print(f"{'students':>9} {'supervisors':>12} {'pairs':>8} {'LP (s)':>9} {'MILP (s)':>9} {'objectives agree':>18}")
+for n, m in [(300, 90), (570, 121), (900, 150), (2000, 200)]:
+    stu, sup = synth(n, m)
+    score, _ = mc.build_score_matrix(stu, sup)
+    cand = mc.build_candidates(score, hard_floor=0.15, top_k=25)
+    p = mc.AllocationParams(good_threshold=float(np.quantile(score, 0.97)), tolerance=0.08)
+    a = mc.allocate(stu, sup, score, cand, mc.AllocationParams(**{**p.__dict__, "engine": "lp"}))
+    b = mc.allocate(stu, sup, score, cand, mc.AllocationParams(**{**p.__dict__, "engine": "milp"}))
+    agree = "yes" if abs(a.total_score - b.total_score) < 1e-6 else f"no ({a.total_score:.3f} vs {b.total_score:.3f})"
+    print(f"{n:>9} {m:>12} {len(cand):>8} {a.solve_seconds:>9.2f} {b.solve_seconds:>9.2f} {agree:>18}")
+
+
+##### FILE: sample_supervisors.csv #####
+
+supervisor_id,name,group,research_areas,methods,keywords,allowance_units,cap_UG,cap_PGT,min_load,available,programmes,notes
+SUP000,Sam Xu,Accounting & Finance,inventory control; supply chain; management science; stochastic programming; dynamic programming; retail pricing,optimisation; simulation; regression; machine learning; case study; survey; text mining; experiment,finance accounting operations case study simulation UK firms panel data empirical,13.0,8,5,0,1,,
+SUP001,Eve Hughes,Accounting & Finance,finance; banking; accounting; strategy; sustainability,case study;interview;experiment,finance banking case study interview experiment UK firms panel data empirical,9.0,8,4,0,1,BSc International Business;MSc Business Analytics,
+SUP002,Fraser Young,Accounting & Finance,accounting;finance,case study;simulation,accounting finance case study simulation UK firms panel data empirical,15.0,,,0,1,,
+SUP003,Chen Grant,Accounting & Finance,banking;accounting,optimisation;regression;simulation,banking accounting optimisation regression simulation UK firms panel data empirical,9.0,,4,0,1,,
+SUP004,Kate Taylor,Accounting & Finance,finance;accounting,regression;interview,finance accounting regression interview UK firms panel data empirical,9.0,,,0,1,,
+SUP005,Chen Evans,Accounting & Finance,accounting;finance,text mining;survey;optimisation,accounting finance text mining survey optimisation UK firms panel data empirical,9.0,,6,0,1,,
+SUP006,Xiu Young,Accounting & Finance,finance;banking;hrm,text mining;interview,finance banking hrm text mining interview UK firms panel data empirical,15.0,6,,0,0,,
+SUP007,Pavel Young,Accounting & Finance,finance;banking;strategy,simulation;econometrics,finance banking strategy simulation econometrics UK firms panel data empirical,14.0,,,0,1,,
+SUP008,Rhona Brown,Accounting & Finance,accounting;finance,text mining;interview,accounting finance text mining interview UK firms panel data empirical,6.0,,4,0,1,,
+SUP009,Pavel Paterson,Accounting & Finance,finance;accounting;entrepreneurship,simulation;text mining,finance accounting entrepreneurship simulation text mining UK firms panel data empirical,8.0,,6,0,1,,
+SUP010,Olga Kerr,Accounting & Finance,banking;accounting;operations,survey;regression,banking accounting operations survey regression UK firms panel data empirical,15.0,,,0,1,,
+SUP011,Grace MacLeod,Accounting & Finance,accounting;finance;operations,case study;simulation,accounting finance operations case study simulation UK firms panel data empirical,14.0,,,0,1,,
+SUP012,Xiu Irvine,Accounting & Finance,accounting;finance,case study;text mining,accounting finance case study text mining UK firms panel data empirical,14.0,,,0,1,BSc International Business;BSc Business Management,
+SUP013,Ben Xu,Accounting & Finance,finance;banking;entrepreneurship,interview;econometrics,finance banking entrepreneurship interview econometrics UK firms panel data empirical,8.0,3,4,0,1,MSc Finance;BSc Accounting & Finance,
+SUP014,Umar Grant,Accounting & Finance,accounting;finance,optimisation;systematic review;survey,accounting finance optimisation systematic review survey UK firms panel data empirical,10.0,5,,0,0,MSc Business Analytics;MSc Management,
+SUP015,Will Hughes,Accounting & Finance,accounting;finance,systematic review;experiment;regression,accounting finance systematic review experiment regression UK firms panel data empirical,14.0,,2,0,1,,
+SUP016,Rhona Kerr,Accounting & Finance,accounting;finance;retail,survey;interview;text mining,accounting finance retail survey interview text mining UK firms panel data empirical,8.0,4,,0,1,,
+SUP017,Zoe Jones,Accounting & Finance,accounting;banking,interview;machine learning,accounting banking interview machine learning UK firms panel data empirical,8.0,,,0,1,,
+SUP018,Will Irvine,Accounting & Finance,finance;accounting;digital economy,machine learning;network analysis,finance accounting digital economy machine learning network analysis UK firms panel data empirical,8.0,,3,0,1,BSc Accounting & Finance;BSc Business Management,
+SUP019,Qi Young,Accounting & Finance,finance;banking,survey;econometrics;network analysis,finance banking survey econometrics network analysis UK firms panel data empirical,7.0,6,4,0,1,,
+SUP020,Qi MacLeod,Accounting & Finance,banking;finance;supply chain,experiment;network analysis,banking finance supply chain experiment network analysis UK firms panel data empirical,11.0,5,,0,1,,
+SUP021,Alice Douglas,Accounting & Finance,finance;banking,survey;experiment;optimisation,finance banking survey experiment optimisation UK firms panel data empirical,9.0,5,3,0,1,,
+SUP022,Jian Brown,Accounting & Finance,accounting;finance,interview;network analysis,accounting finance interview network analysis UK firms panel data empirical,6.0,,,0,1,,
+SUP023,Niall Fraser,Accounting & Finance,finance;banking,experiment;case study,finance banking experiment case study UK firms panel data empirical,13.0,,,0,0,,
+SUP024,Isla Young,Marketing,consumer behaviour;retail;digital economy,regression;survey;econometrics,consumer behaviour retail digital economy regression survey econometrics UK firms panel data empirical,15.0,,4,0,1,,
+SUP025,Isla Kerr,Marketing,marketing analytics;retail,machine learning;optimisation;network analysis,marketing analytics retail machine learning optimisation network analysis UK firms panel data empirical,13.0,4,6,0,1,,
+SUP026,Maya Irvine,Marketing,retail;marketing analytics,interview;text mining,retail marketing analytics interview text mining UK firms panel data empirical,13.0,7,4,0,1,,
+SUP027,Niall MacLeod,Marketing,consumer behaviour;retail;banking,machine learning;network analysis,consumer behaviour retail banking machine learning network analysis UK firms panel data empirical,15.0,,6,0,1,,
+SUP028,Yara Stewart,Marketing,marketing analytics;consumer behaviour,experiment;text mining,marketing analytics consumer behaviour experiment text mining UK firms panel data empirical,9.0,,,0,1,,
+SUP029,Sam Vance,Marketing,retail;marketing analytics;healthcare management,text mining;simulation;optimisation,retail marketing analytics healthcare management text mining simulation optimisation UK firms panel data empirical,11.0,,,0,1,,
+SUP030,Niall Urquhart,Marketing,marketing analytics;consumer behaviour,case study;network analysis;econometrics,marketing analytics consumer behaviour case study network analysis econometrics UK firms panel data empirical,13.0,6,5,0,1,,
+SUP031,Isla MacLeod,Marketing,marketing analytics;consumer behaviour;accounting,machine learning;case study,marketing analytics consumer behaviour accounting machine learning case study UK firms panel data empirical,8.0,4,,0,1,,
+SUP032,Zoe MacLeod,Marketing,consumer behaviour;retail,network analysis;optimisation;interview,consumer behaviour retail network analysis optimisation interview UK firms panel data empirical,9.0,4,6,0,1,,
+SUP033,Rhona Evans,Marketing,retail;consumer behaviour,experiment;optimisation,retail consumer behaviour experiment optimisation UK firms panel data empirical,14.0,,,0,0,,
+SUP034,Ben Jones,Marketing,consumer behaviour;marketing analytics,systematic review;interview;survey,consumer behaviour marketing analytics systematic review interview survey UK firms panel data empirical,13.0,,2,0,1,,
+SUP035,Kate Xu,Marketing,consumer behaviour;retail,machine learning;interview;experiment,consumer behaviour retail machine learning interview experiment UK firms panel data empirical,11.0,3,,0,1,,
+SUP036,Rhona Lewis,Marketing,marketing analytics;consumer behaviour;digital economy,experiment;econometrics,marketing analytics consumer behaviour digital economy experiment econometrics UK firms panel data empirical,9.0,5,,0,1,MSc Business Analytics;BSc International Business,
+SUP037,Grace Ogilvie,Marketing,retail;marketing analytics,network analysis;text mining,retail marketing analytics network analysis text mining UK firms panel data empirical,15.0,4,,0,1,,
+SUP038,Xiu Urquhart,Marketing,marketing analytics;consumer behaviour,econometrics;simulation,marketing analytics consumer behaviour econometrics simulation UK firms panel data empirical,7.0,6,4,0,1,,
+SUP039,Zoe Paterson,Management Science & Business Economics,supply chain;logistics;sustainability,regression;experiment,supply chain logistics sustainability regression experiment UK firms panel data empirical,8.0,,,0,1,,
+SUP040,Chen Stewart,Management Science & Business Economics,logistics;supply chain;consumer behaviour,systematic review;text mining;network analysis,logistics supply chain consumer behaviour systematic review text mining network analysis UK firms panel data empirical,14.0,,,0,1,,
+SUP041,Liam Ross,Management Science & Business Economics,digital economy;logistics;marketing analytics,interview;econometrics;regression,digital economy logistics marketing analytics interview econometrics regression UK firms panel data empirical,10.0,7,6,0,1,,
+SUP042,Chen Evans,Management Science & Business Economics,logistics;digital economy,machine learning;regression,logistics digital economy machine learning regression UK firms panel data empirical,9.0,,2,0,0,,
+SUP043,Zoe Vance,Management Science & Business Economics,logistics;digital economy;supply chain,survey;network analysis;machine learning,logistics digital economy supply chain survey network analysis machine learning UK firms panel data empirical,12.0,,,0,1,BSc Accounting & Finance;BSc International Business,
+SUP044,Kate Campbell,Management Science & Business Economics,digital economy;logistics,network analysis;optimisation;regression,digital economy logistics network analysis optimisation regression UK firms panel data empirical,9.0,3,,0,1,,
+SUP045,Isla Paterson,Management Science & Business Economics,digital economy;supply chain,text mining;systematic review,digital economy supply chain text mining systematic review UK firms panel data empirical,10.0,,4,0,1,,
+SUP046,Qi Young,Management Science & Business Economics,logistics;supply chain;retail,network analysis;simulation;systematic review,logistics supply chain retail network analysis simulation systematic review UK firms panel data empirical,8.0,,,0,1,,
+SUP047,Isla Paterson,Management Science & Business Economics,digital economy;supply chain,econometrics;text mining,digital economy supply chain econometrics text mining UK firms panel data empirical,13.0,,,0,1,MSc Marketing;MSc Finance,
+SUP048,Alice Lewis,Management Science & Business Economics,supply chain;operations;retail,experiment;simulation;regression,supply chain operations retail experiment simulation regression UK firms panel data empirical,7.0,,,0,1,,
+SUP049,Maya Taylor,Management Science & Business Economics,operations;supply chain,machine learning;case study;experiment,operations supply chain machine learning case study experiment UK firms panel data empirical,8.0,7,,0,1,,
+SUP050,Pavel Paterson,Management Science & Business Economics,operations;supply chain,network analysis;experiment,operations supply chain network analysis experiment UK firms panel data empirical,11.0,4,,0,0,,
+SUP051,Pavel Watson,Management Science & Business Economics,logistics;operations;strategy,network analysis;case study;econometrics,logistics operations strategy network analysis case study econometrics UK firms panel data empirical,6.0,,2,0,1,,
+SUP052,Jian Grant,Management Science & Business Economics,digital economy;logistics;retail,systematic review;text mining;econometrics,digital economy logistics retail systematic review text mining econometrics UK firms panel data empirical,12.0,8,,0,1,,
+SUP053,Fraser Quinn,Management Science & Business Economics,operations;logistics,experiment;regression;simulation,operations logistics experiment regression simulation UK firms panel data empirical,11.0,,5,0,1,,
+SUP054,Rhona Vance,Management Science & Business Economics,logistics;digital economy;strategy,network analysis;text mining;optimisation,logistics digital economy strategy network analysis text mining optimisation UK firms panel data empirical,13.0,,5,0,1,,
+SUP055,Will Campbell,Management Science & Business Economics,logistics;digital economy,systematic review;case study;optimisation,logistics digital economy systematic review case study optimisation UK firms panel data empirical,14.0,,,0,1,,
+SUP056,Niall Fraser,Management Science & Business Economics,logistics;operations;supply chain,optimisation;simulation;interview,logistics operations supply chain optimisation simulation interview UK firms panel data empirical,6.0,,,0,1,,
+SUP057,Grace Fraser,Management Science & Business Economics,supply chain;operations,simulation;experiment;survey,supply chain operations simulation experiment survey UK firms panel data empirical,15.0,,,0,1,,
+SUP058,Qi Grant,Management Science & Business Economics,digital economy;logistics,regression;optimisation;machine learning,digital economy logistics regression optimisation machine learning UK firms panel data empirical,6.0,,,0,1,,
+SUP059,Rhona Jones,Management Science & Business Economics,digital economy;operations,simulation;optimisation;case study,digital economy operations simulation optimisation case study UK firms panel data empirical,9.0,8,2,0,1,,
+SUP060,Pavel Kerr,Strategy & Innovation,sustainability;digital economy,regression;experiment,sustainability digital economy regression experiment UK firms panel data empirical,12.0,8,,0,1,,
+SUP061,Hamid Jones,Strategy & Innovation,digital economy;strategy,case study;survey;systematic review,digital economy strategy case study survey systematic review UK firms panel data empirical,13.0,8,,0,1,,
+SUP062,Zoe Campbell,Strategy & Innovation,digital economy;sustainability,simulation;survey;systematic review,digital economy sustainability simulation survey systematic review UK firms panel data empirical,15.0,,2,0,1,,
+SUP063,Zoe Evans,Strategy & Innovation,strategy;sustainability,case study;interview;text mining,strategy sustainability case study interview text mining UK firms panel data empirical,9.0,,,0,1,,
+SUP064,Alice Hughes,Strategy & Innovation,sustainability;strategy,case study;simulation,sustainability strategy case study simulation UK firms panel data empirical,12.0,3,6,0,1,,
+SUP065,Grace Vance,Strategy & Innovation,sustainability;strategy;marketing analytics,econometrics;case study;regression,sustainability strategy marketing analytics econometrics case study regression UK firms panel data empirical,11.0,4,,0,1,,
+SUP066,Liam Vance,Strategy & Innovation,sustainability;digital economy;entrepreneurship,network analysis;econometrics,sustainability digital economy entrepreneurship network analysis econometrics UK firms panel data empirical,13.0,,,0,1,,
+SUP067,Niall Brown,Strategy & Innovation,strategy;sustainability,survey;regression;interview,strategy sustainability survey regression interview UK firms panel data empirical,15.0,,,0,1,,
+SUP068,Liam Taylor,Strategy & Innovation,digital economy;sustainability,experiment;text mining,digital economy sustainability experiment text mining UK firms panel data empirical,11.0,,,0,1,,
+SUP069,Dara Anderson,Strategy & Innovation,sustainability;digital economy,machine learning;experiment,sustainability digital economy machine learning experiment UK firms panel data empirical,15.0,,5,0,1,,
+SUP070,Grace Watson,Strategy & Innovation,strategy;digital economy,simulation;interview,strategy digital economy simulation interview UK firms panel data empirical,9.0,,,0,1,,
+SUP071,Jian Irvine,Strategy & Innovation,digital economy;strategy;healthcare management,experiment;network analysis;systematic review,digital economy strategy healthcare management experiment network analysis systematic review UK firms panel data empirical,15.0,,,0,1,BSc International Business;BSc Business Management,
+SUP072,Qi Taylor,Strategy & Innovation,sustainability;digital economy,machine learning;network analysis;econometrics,sustainability digital economy machine learning network analysis econometrics UK firms panel data empirical,7.0,4,4,0,1,,
+SUP073,Ben Vance,Strategy & Innovation,strategy;sustainability;retail,machine learning;optimisation;text mining,strategy sustainability retail machine learning optimisation text mining UK firms panel data empirical,14.0,8,,0,1,,
+SUP074,Maya Lewis,Strategy & Innovation,digital economy;sustainability;supply chain,case study;econometrics,digital economy sustainability supply chain case study econometrics UK firms panel data empirical,9.0,,3,0,1,,
+SUP075,Isla Taylor,Strategy & Innovation,strategy;sustainability;consumer behaviour,network analysis;text mining;survey,strategy sustainability consumer behaviour network analysis text mining survey UK firms panel data empirical,10.0,,,0,1,,
+SUP076,Eve Urquhart,Strategy & Innovation,strategy;digital economy;entrepreneurship,experiment;econometrics;text mining,strategy digital economy entrepreneurship experiment econometrics text mining UK firms panel data empirical,11.0,,,0,1,,
+SUP077,Dara Lewis,Strategy & Innovation,digital economy;sustainability,machine learning;survey,digital economy sustainability machine learning survey UK firms panel data empirical,10.0,,,0,1,,
+SUP078,Pavel Brown,Strategy & Innovation,strategy;sustainability;banking,systematic review;case study;interview,strategy sustainability banking systematic review case study interview UK firms panel data empirical,9.0,,,0,1,,
+SUP079,Kate Nolan,Strategy & Innovation,strategy;sustainability,case study;systematic review;regression,strategy sustainability case study systematic review regression UK firms panel data empirical,15.0,5,,0,1,,
+SUP080,Liam Paterson,Strategy & Innovation,digital economy;sustainability;retail,experiment;machine learning;interview,digital economy sustainability retail experiment machine learning interview UK firms panel data empirical,12.0,4,,0,1,,
+SUP081,Dara Ross,Strategy & Innovation,strategy;sustainability,systematic review;network analysis,strategy sustainability systematic review network analysis UK firms panel data empirical,11.0,6,,0,1,,
+SUP082,Pavel MacLeod,Organisation Studies,strategy;healthcare management,simulation;machine learning,strategy healthcare management simulation machine learning UK firms panel data empirical,13.0,,5,0,1,,
+SUP083,Tara Evans,Organisation Studies,hrm;strategy;retail,machine learning;regression,hrm strategy retail machine learning regression UK firms panel data empirical,9.0,,2,0,1,,
+SUP084,Xiu Grant,Organisation Studies,hrm;healthcare management,case study;text mining,hrm healthcare management case study text mining UK firms panel data empirical,15.0,3,,0,0,MSc Management;MSc Marketing,
+SUP085,Umar Young,Organisation Studies,hrm;strategy;accounting,simulation;systematic review;experiment,hrm strategy accounting simulation systematic review experiment UK firms panel data empirical,12.0,7,,0,1,,
+SUP086,Zoe Ogilvie,Organisation Studies,healthcare management;hrm,network analysis;text mining,healthcare management hrm network analysis text mining UK firms panel data empirical,12.0,3,,0,1,,
+SUP087,Tara Young,Organisation Studies,hrm;healthcare management,optimisation;machine learning;systematic review,hrm healthcare management optimisation machine learning systematic review UK firms panel data empirical,9.0,,,0,1,,
+SUP088,Olga MacLeod,Organisation Studies,healthcare management;hrm,econometrics;text mining,healthcare management hrm econometrics text mining UK firms panel data empirical,7.0,7,,0,1,,
+SUP089,Kate Lewis,Organisation Studies,hrm;strategy,simulation;experiment,hrm strategy simulation experiment UK firms panel data empirical,8.0,,4,0,1,,
+SUP090,Fraser Irvine,Organisation Studies,strategy;healthcare management,systematic review;interview,strategy healthcare management systematic review interview UK firms panel data empirical,8.0,6,,0,1,,
+SUP091,Yara Douglas,Organisation Studies,healthcare management;strategy,network analysis;systematic review,healthcare management strategy network analysis systematic review UK firms panel data empirical,14.0,5,5,0,1,,
+SUP092,Vera Young,Organisation Studies,hrm;healthcare management,optimisation;network analysis;survey,hrm healthcare management optimisation network analysis survey UK firms panel data empirical,6.0,,5,0,1,,
+SUP093,Sam Vance,Organisation Studies,strategy;hrm;accounting,case study;experiment;survey,strategy hrm accounting case study experiment survey UK firms panel data empirical,10.0,,,0,1,,
+SUP094,Alice Vance,Organisation Studies,healthcare management;strategy;finance,econometrics;case study,healthcare management strategy finance econometrics case study UK firms panel data empirical,15.0,8,,0,1,BSc International Business;MSc Finance,
+SUP095,Eve Brown,Organisation Studies,strategy;hrm;banking,interview;survey;simulation,strategy hrm banking interview survey simulation UK firms panel data empirical,6.0,,4,0,1,,
+SUP096,Liam Irvine,Organisation Studies,hrm;strategy;digital economy,machine learning;optimisation,hrm strategy digital economy machine learning optimisation UK firms panel data empirical,7.0,,5,0,0,,
+SUP097,Grace Douglas,Organisation Studies,healthcare management;hrm;consumer behaviour,experiment;simulation;text mining,healthcare management hrm consumer behaviour experiment simulation text mining UK firms panel data empirical,9.0,,5,0,1,,
+SUP098,Niall Xu,Organisation Studies,healthcare management;strategy,regression;optimisation;econometrics,healthcare management strategy regression optimisation econometrics UK firms panel data empirical,6.0,,5,0,1,,
+SUP099,Will Anderson,Organisation Studies,healthcare management;hrm;operations,interview;experiment;case study,healthcare management hrm operations interview experiment case study UK firms panel data empirical,13.0,,,0,1,MSc Finance;BSc International Business,
+SUP100,Zoe Douglas,Entrepreneurship & Innovation,digital economy;sustainability;hrm,network analysis;survey,digital economy sustainability hrm network analysis survey UK firms panel data empirical,14.0,,,0,1,,
+SUP101,Rhona Stewart,Entrepreneurship & Innovation,digital economy;entrepreneurship;strategy,interview;text mining;econometrics,digital economy entrepreneurship strategy interview text mining econometrics UK firms panel data empirical,14.0,3,,0,0,,
+SUP102,Yara Zhang,Entrepreneurship & Innovation,digital economy;entrepreneurship;logistics,simulation;regression,digital economy entrepreneurship logistics simulation regression UK firms panel data empirical,12.0,,3,0,1,,
+SUP103,Niall Young,Entrepreneurship & Innovation,sustainability;digital economy;healthcare management,machine learning;optimisation;interview,sustainability digital economy healthcare management machine learning optimisation interview UK firms panel data empirical,7.0,3,4,0,1,,
+SUP104,Will Jones,Entrepreneurship & Innovation,digital economy;entrepreneurship,systematic review;simulation;text mining,digital economy entrepreneurship systematic review simulation text mining UK firms panel data empirical,7.0,7,5,0,1,,
+SUP105,Zoe Young,Entrepreneurship & Innovation,digital economy;sustainability;consumer behaviour,network analysis;survey;regression,digital economy sustainability consumer behaviour network analysis survey regression UK firms panel data empirical,12.0,6,,0,0,,
+SUP106,Grace Brown,Entrepreneurship & Innovation,digital economy;entrepreneurship,survey;simulation;network analysis,digital economy entrepreneurship survey simulation network analysis UK firms panel data empirical,6.0,3,2,0,1,,
+SUP107,Kate Stewart,Entrepreneurship & Innovation,digital economy;entrepreneurship,interview;machine learning;optimisation,digital economy entrepreneurship interview machine learning optimisation UK firms panel data empirical,11.0,5,5,0,1,,
+SUP108,Liam Douglas,Entrepreneurship & Innovation,sustainability;entrepreneurship;digital economy,interview;systematic review;machine learning,sustainability entrepreneurship digital economy interview systematic review machine learning UK firms panel data empirical,14.0,,,0,1,,
+SUP109,Tara Grant,Entrepreneurship & Innovation,digital economy;sustainability,regression;econometrics;simulation,digital economy sustainability regression econometrics simulation UK firms panel data empirical,11.0,6,,0,1,BSc Accounting & Finance;MSc Finance,
+SUP110,Hamid Douglas,Entrepreneurship & Innovation,sustainability;digital economy,survey;systematic review;interview,sustainability digital economy survey systematic review interview UK firms panel data empirical,10.0,5,6,0,1,,
+SUP111,Kate Jones,Entrepreneurship & Innovation,sustainability;digital economy,systematic review;regression,sustainability digital economy systematic review regression UK firms panel data empirical,10.0,,6,0,1,MSc Management;BSc Business Management,
+SUP112,Sam Zhang,Entrepreneurship & Innovation,digital economy;entrepreneurship,experiment;optimisation;interview,digital economy entrepreneurship experiment optimisation interview UK firms panel data empirical,9.0,,3,0,1,,
+SUP113,Zoe Urquhart,Entrepreneurship & Innovation,sustainability;digital economy,case study;interview,sustainability digital economy case study interview UK firms panel data empirical,8.0,,,0,1,,
+SUP114,Rhona Young,Entrepreneurship & Innovation,digital economy;sustainability,interview;experiment;network analysis,digital economy sustainability interview experiment network analysis UK firms panel data empirical,7.0,4,,0,1,,
+SUP115,Sam Urquhart,Entrepreneurship & Innovation,digital economy;entrepreneurship,econometrics;machine learning,digital economy entrepreneurship econometrics machine learning UK firms panel data empirical,11.0,8,,0,1,,
+SUP116,Hamid Anderson,Entrepreneurship & Innovation,sustainability;digital economy;hrm,network analysis;case study,sustainability digital economy hrm network analysis case study UK firms panel data empirical,6.0,,,0,1,,
+SUP117,Hamid Stewart,Entrepreneurship & Innovation,digital economy;sustainability,optimisation;survey;regression,digital economy sustainability optimisation survey regression UK firms panel data empirical,9.0,3,3,0,1,,
+SUP118,Grace Kerr,Entrepreneurship & Innovation,sustainability;digital economy,systematic review;econometrics,sustainability digital economy systematic review econometrics UK firms panel data empirical,8.0,8,,0,1,,
+SUP119,Will Campbell,Entrepreneurship & Innovation,entrepreneurship;digital economy,optimisation;interview;case study,entrepreneurship digital economy optimisation interview case study UK firms panel data empirical,13.0,,5,0,1,,
+SUP120,Jian Vance,Entrepreneurship & Innovation,entrepreneurship;sustainability,interview;experiment;machine learning,entrepreneurship sustainability interview experiment machine learning UK firms panel data empirical,9.0,,,0,1,BSc International Business;MSc Marketing,
+
+
+##### FILE: sample_students.csv #####
+
+student_id,name,level,programme,project_title,project_name,abstract,areas,methods,references,preferred_supervisor_id,preferred_group,locked_supervisor_id
+s2400000,Xiu Quinn,UG,BSc Accounting & Finance,Exploring strategy adoption using simulation,UG-0000,"This project investigates strategy in UK firms. Using simulation, it draws on published secondary data and asks whether strategy is associated with measurable performance outcomes.",strategy,simulation,Smith (2021); Lee and Wang (2020) on strategy,,,
+s2400001,Rhona Evans,UG,BSc Accounting & Finance,Exploring sustainability adoption using simulation,UG-0001,"This project investigates sustainability in UK firms. Using simulation, it draws on published secondary data and asks whether sustainability is associated with measurable performance outcomes.",sustainability,simulation,Smith (2021); Lee and Wang (2020) on sustainability,,,
+s2400002,Ben Ross,UG,BSc International Business,operations in the UK context: a regression study,UG-0002,"This project investigates operations in UK firms. Using regression, it draws on published secondary data and asks whether operations is associated with measurable performance outcomes.",operations,regression,Smith (2021); Lee and Wang (2020) on operations,SUP086,,
+s2400003,Zoe Vance,UG,BSc International Business,hrm in the UK context: a text mining study,UG-0003,"This project investigates hrm in UK firms. Using text mining, it draws on published secondary data and asks whether hrm is associated with measurable performance outcomes.",hrm,text mining,Smith (2021); Lee and Wang (2020) on hrm,,,
+s2400004,Zoe MacLeod,UG,BSc Accounting & Finance,The impact of entrepreneurship practices on firm performance: evidence from text mining,UG-0004,"This project investigates entrepreneurship in UK firms. Using text mining, it draws on published secondary data and asks whether entrepreneurship is associated with measurable performance outcomes.",entrepreneurship,text mining,Smith (2021); Lee and Wang (2020) on entrepreneurship,,,
+... 565 further rows omitted here ...
+
+
+##### FILE: sample_conflicts.csv #####
+
+student_id,supervisor_id,reason
+s2400007,SUP003,family relationship declared
+s2400052,SUP010,supervisor involved in a previous appeal
+s2400400,SUP022,supervisor sits on the student's discipline panel

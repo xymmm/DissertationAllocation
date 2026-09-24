@@ -52,6 +52,8 @@ import pandas as pd
 
 import matching_core as mc
 
+__version__ = "2.0.0"
+
 DEFAULT_LEVEL_WEIGHTS = {"UG": 1.0, "PGT": 1.5}
 
 PROFILE_FIELDS = ["name", "group", "research_areas", "methods", "keywords",
@@ -386,6 +388,17 @@ class SessionStore:
                 "below_good": bool(row["below_good"]),
                 "locked": bool(row["locked"]),
             })
+        return self.commit_rows(rows, label, level, programmes, params, actor)
+
+    def commit_rows(self, rows: List[dict], label: str, level: str,
+                    programmes: Sequence[str], params: dict,
+                    actor: str = "office") -> dict:
+        """Commit pairings that were produced elsewhere, such as by the command line.
+
+        A draft written to disk one afternoon can then be reviewed and committed the
+        next morning without rerunning anything, which is the ordinary rhythm of an
+        office that wants a second pair of eyes before an allocation becomes real.
+        """
         rnd = {
             "round_id": uuid.uuid4().hex[:8],
             "label": label,

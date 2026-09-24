@@ -3,11 +3,11 @@ matching_core.py
 ================
 Scoring and optimisation core for undergraduate dissertation allocation.
 
-The module is deliberately independent of Streamlit and of any LLM so that the
-allocation itself stays deterministic, auditable and reproducible: given the
-same two CSV files and the same parameters it returns exactly the same
-allocation, which is what a teaching operations office needs when a student
-queries the outcome.
+The allocation is arithmetic and nothing else: no model, no service, no
+randomness. Given the same two CSV files and the same parameters it returns
+exactly the same allocation, and every pairing can be explained by pointing at
+what the student and the supervisor have in common. That is what a teaching
+operations office needs when a student queries the outcome months later.
 
 Two solution engines are provided.
 
@@ -39,6 +39,8 @@ from scipy.sparse import coo_matrix
 
 import text_analysis as ta
 
+__version__ = "2.0.0"
+
 # ---------------------------------------------------------------------------
 # Expected columns
 # ---------------------------------------------------------------------------
@@ -62,7 +64,7 @@ STUDENT_COLUMNS = {
     "project_title": True,
     "abstract": True,
     "project_name": False,      # student's own working name for the project
-    "areas": False,             # tags, either self-declared or LLM-extracted
+    "areas": False,             # tags as declared by the student
     "methods": False,
     "references": False,        # free text reference list
     "preferred_supervisor_id": False,
@@ -276,8 +278,6 @@ def build_score_matrix(
     weights: ScoreWeights = ScoreWeights(),
     synonyms: Optional[Dict[str, str]] = None,
     taxonomy: Optional[MethodTaxonomy] = None,
-    llm_scores: Optional[np.ndarray] = None,
-    llm_blend: float = 0.0,
     latent_share: float = 0.5,
 ) -> Tuple[np.ndarray, Dict[str, object]]:
     """Return the student by supervisor score matrix in [0, 1], plus its parts.
@@ -353,12 +353,6 @@ def build_score_matrix(
 
     score = (w.area * area + w.method * method + w.text * text + w.phrase * phrase_score
              + w.preference * pref + w.same_group * same_group)
-
-    if llm_scores is not None and llm_blend > 0:
-        mask = ~np.isnan(llm_scores)
-        blended = score.copy()
-        blended[mask] = (1 - llm_blend) * score[mask] + llm_blend * llm_scores[mask]
-        score = blended
 
     components = {
         "area": area, "method": method, "text": text, "phrase": phrase_score,
