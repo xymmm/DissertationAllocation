@@ -1,7 +1,7 @@
 # Dissertation allocation
 
 Allocates business school dissertations to supervisors, undergraduate and taught
-postgraduate, for a teaching operations office. It runs on one computer, keeps its records in
+postgraduate. It runs on one computer, keeps its records in
 one file, and produces a report that somebody who has never seen the code can read.
 
 There is no web server, no account to sign in to and no AI service involved. Nothing is sent
